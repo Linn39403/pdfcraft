@@ -1125,6 +1125,7 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
             piece == si
                 && lines.last().is_some_and(|l| l.scope == s.scope && l.logical_order == s.logical_order)
                 && (bt == s.bt || lines.last().is_some_and(|l| compatible_word(l, &s)))
+                && (s.text.trim().is_empty() || lines.last().is_some_and(|l| same_character_spacing_and_scale(l, &s)))
                 && (s.text.trim().is_empty() || lines.last().is_some_and(|l| same_font(l, &s.font, s.face.as_deref())))
                 && (s.text.trim().is_empty()
                     || lines.last().is_some_and(|l| {
@@ -1200,6 +1201,14 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
     Ok(lines)
 }
 
+/// A line has only one source state. Keep visible runs with different character spacing or
+/// horizontal scale separate even within one BT/ET, so editing cannot apply the first run's
+/// state to later text. Whitespace-only shows keep the existing joining behavior; the paragraph
+/// grouper can still keep distinct visible runs on one visual row.
+fn same_character_spacing_and_scale(line: &TextLine, shown: &Shown) -> bool {
+    (line.origin.state.char_spacing - shown.state.char_spacing).abs() < 1e-6 && (line.origin.state.scale - shown.state.scale).abs() < 1e-6
+}
+
 /// Joining independent text objects is safe only when they use the same text and graphics
 /// transforms and spacing. In particular, a nearby rotated label isn't part of this line.
 fn compatible_word(line: &TextLine, shown: &Shown) -> bool {
@@ -1220,6 +1229,7 @@ fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<Pen>, s: Shown, stream
         let bt = pen.bt;
         lines.last().is_some_and(|l| l.scope == s.scope && l.logical_order == s.logical_order)
             && (bt == s.bt || lines.last().is_some_and(|l| compatible_word(l, &s)))
+            && (s.text.trim().is_empty() || lines.last().is_some_and(|l| same_character_spacing_and_scale(l, &s)))
             && (s.text.trim().is_empty() || lines.last().is_some_and(|l| same_font(l, &s.font, s.face.as_deref())))
             && (s.text.trim().is_empty()
                 || lines.last().is_some_and(|l| {
