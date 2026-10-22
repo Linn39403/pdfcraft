@@ -357,14 +357,11 @@ fn mixed_paragraph_edit_preserves_public_selection_and_other_paragraphs() {
 fn unsupported_mixed_positioning_refuses_without_mutating() {
     let infinity = "9".repeat(400);
     let cases = [
-        "BT /F1 24 Tf 72 700 Td (A ) Tj 3 Tc [(t) -100 (ai) 100 (l)] TJ ET".to_string(),
-        "BT /F1 24 Tf 72 700 Td (A ) Tj [100] TJ 3 Tc (tail) Tj ET".into(),
         "BT /F1 24 Tf 72 700 Td (A ) Tj 1 0 0 1 100 700 Tm 3 Tc (tail) Tj ET".into(),
         "BT /F1 24 Tf 0 1 -1 0 300 300 Tm (A ) Tj 3 Tc (tail) Tj ET".into(),
         "BT /F1 24 Tf 1 0 0.2 1 72 700 Tm (A ) Tj 3 Tc (tail) Tj ET".into(),
         "BT /F1 24 Tf 72 700 Td (A ) Tj -30 Tc (tail) Tj ET".into(),
         format!("BT /F1 24 Tf 72 700 Td (A ) Tj {infinity} Tc (tail) Tj ET"),
-        "BT /F1 24 Tf 24 TL 72 700 Td (A ) Tj 3 Tc (tail) Tj 0 Tc T* [(Other) -100 (row)] TJ ET".into(),
         "BT /F1 24 Tf 72 700 Td (A ) Tj 3 Tc 3 Tr (tail) Tj ET".into(),
         "BT /F1 24 Tf 72 700 Td (A ) Tj 3 Tc 1 Ts (tail) Tj ET".into(),
         "BT /F1 24 Tf 72 700 Td (A ) Tj 3 Tr (hidden) Tj 0 Tr ( visible) Tj 0.001 Tc (tail) Tj ET".into(),
@@ -374,12 +371,8 @@ fn unsupported_mixed_positioning_refuses_without_mutating() {
             let mut doc = fixture(content);
             let before = write_full(&doc, &SaveOptions::default()).unwrap();
             let result = if paragraph { replace_block(&mut doc, 0, 0, "B tail") } else { replace_line(&mut doc, 0, 0, "B tail") };
-            if index == 7 && !paragraph {
-                assert!(result.is_ok(), "unselected positioned row does not block line editing");
-            } else {
-                assert!(result.is_err(), "case {index}, paragraph={paragraph}");
-                assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), before, "refusal changes nothing");
-            }
+            assert!(result.is_err(), "case {index}, paragraph={paragraph}");
+            assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), before, "refusal changes nothing");
         }
     }
 }
@@ -453,5 +446,302 @@ fn mixed_paragraph_fallback_failure_is_atomic() {
     for replacement in ["א tail", "क tail", "B\u{0301} tail"] {
         assert!(replace_block(&mut doc, 0, 0, replacement).is_err());
         assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), before);
+    }
+}
+
+/// Independent per-glyph pen oracle for these synthetic horizontal source programs.
+fn glyph_positions(doc: &Document) -> Vec<(char, f64, f64)> {
+    use pdfcraft_content::Matrix;
+    use pdfcraft_cos::Object;
+    let page = pdfcraft_model::pages(doc).remove(0);
+    let resources = doc.dict(page.dict.get(b"Resources").unwrap()).unwrap();
+    let fonts = doc.dict(resources.get(b"Font").unwrap()).unwrap();
+    let mut state = (Matrix::IDENTITY, String::new(), 0.0, 0.0, 0.0, 1.0, 0.0);
+    let mut stack = Vec::new();
+    let mut tm = Matrix::IDENTITY;
+    let mut tlm = tm;
+    let mut out = Vec::new();
+    for op in pdfcraft_content::parse(&content_bytes(doc)).ops {
+        match op.op.as_slice() {
+            b"q" => stack.push(state.clone()),
+            b"Q" => state = stack.pop().unwrap(),
+            b"cm" => state.0 = Matrix(op.nums::<6>().unwrap()).then(&state.0),
+            b"BT" => {
+                tm = Matrix::IDENTITY;
+                tlm = tm;
+            }
+            b"Tf" => {
+                state.1 = String::from_utf8(op.name(0).unwrap().to_vec()).unwrap();
+                state.2 = op.num(1).unwrap();
+            }
+            b"Tc" => state.3 = op.num(0).unwrap(),
+            b"Tw" => state.4 = op.num(0).unwrap(),
+            b"Tz" => state.5 = op.num(0).unwrap() / 100.0,
+            b"TL" => state.6 = op.num(0).unwrap(),
+            b"Tm" => {
+                tm = Matrix(op.nums::<6>().unwrap());
+                tlm = tm;
+            }
+            b"Td" | b"TD" => {
+                let [x, y] = op.nums::<2>().unwrap();
+                if op.is("TD") {
+                    state.6 = -y;
+                }
+                tlm = Matrix([1.0, 0.0, 0.0, 1.0, x, y]).then(&tlm);
+                tm = tlm;
+            }
+            b"T*" => {
+                tlm = Matrix([1.0, 0.0, 0.0, 1.0, 0.0, -state.6]).then(&tlm);
+                tm = tlm;
+            }
+            b"Tj" | b"TJ" | b"'" | b"\"" => {
+                if matches!(op.op.as_slice(), b"'" | b"\"") {
+                    if op.is("\"") {
+                        state.4 = op.num(0).unwrap();
+                        state.3 = op.num(1).unwrap();
+                    }
+                    tlm = Matrix([1.0, 0.0, 0.0, 1.0, 0.0, -state.6]).then(&tlm);
+                    tm = tlm;
+                }
+                let metrics = pdfcraft_fonts::pdf::Metrics::from_dict(doc, &doc.dict(fonts.get(state.1.as_bytes()).unwrap()).unwrap());
+                let pieces = if op.is("TJ") {
+                    op.operands.first().and_then(Object::as_array).unwrap().clone()
+                } else {
+                    vec![op.operands.last().unwrap().clone()]
+                };
+                for piece in pieces {
+                    if let Object::String(string) = piece {
+                        for (code, len) in metrics.codes(&string.bytes) {
+                            let text = metrics.text_of(code).unwrap();
+                            let point = tm.then(&state.0).apply(0.0, 0.0);
+                            out.extend(text.chars().map(|ch| (ch, point.0, point.1)));
+                            let advance =
+                                (metrics.width(code) * state.2 + state.3 + if metrics.is_space(code, len) { state.4 } else { 0.0 }) * state.5;
+                            tm = Matrix([1.0, 0.0, 0.0, 1.0, advance, 0.0]).then(&tm);
+                        }
+                    } else {
+                        let advance = -piece.as_f64().unwrap() / 1000.0 * state.2 * state.5;
+                        tm = Matrix([1.0, 0.0, 0.0, 1.0, advance, 0.0]).then(&tm);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Read serialized TJ values without relying on edited text grouping.
+fn tj_numbers(doc: &Document) -> Vec<f64> {
+    pdfcraft_content::parse(&content_bytes(doc))
+        .ops
+        .iter()
+        .filter(|op| op.is("TJ"))
+        .flat_map(|op| op.operands.iter().filter_map(pdfcraft_cos::Object::as_array).flatten().filter_map(pdfcraft_cos::Object::as_f64))
+        .collect()
+}
+
+/// A/B and 1/2 have equal Helvetica advances, so every original glyph position must survive.
+fn check_positioned_geometry(content: &str, old: &str, new: &str, paragraph: bool) {
+    let mut doc = fixture(content);
+    let before = glyph_positions(&doc);
+    let source = if paragraph { text_blocks(&doc, 0).unwrap()[0].editor_text.clone() } else { text_lines(&doc, 0).unwrap()[0].text.clone() };
+    let replacement = source.replacen(old, new, 1);
+    assert_ne!(replacement, source);
+    if paragraph {
+        replace_block(&mut doc, 0, 0, &replacement).unwrap();
+    } else {
+        replace_line(&mut doc, 0, 0, &replacement).unwrap();
+    }
+    let after = reopen(&doc);
+    let states = character_states(&doc);
+    let saved_states = character_states(&after);
+    assert_eq!(states, saved_states, "full-save state precision");
+    let points = glyph_positions(&after);
+    assert_eq!(before.len(), points.len());
+    if paragraph {
+        assert_eq!(text_blocks(&after, 0).unwrap()[0].editor_text, replacement);
+    } else {
+        assert_eq!(text_lines(&after, 0).unwrap()[0].text, replacement);
+    }
+    for (index, (a, b)) in before.iter().zip(&points).enumerate() {
+        assert!((a.1 - b.1).abs() < 1e-8 && (a.2 - b.2).abs() < 1e-8, "glyph {index}: {a:?} -> {b:?}, paragraph={paragraph}");
+    }
+    let mut repeated = after;
+    if paragraph {
+        replace_block(&mut repeated, 0, 0, &source).unwrap();
+    } else {
+        replace_line(&mut repeated, 0, 0, &source).unwrap();
+    }
+    for (a, b) in before.iter().zip(glyph_positions(&reopen(&repeated))) {
+        assert_eq!(a.0, b.0);
+        assert!((a.1 - b.1).abs() < 1e-8 && (a.2 - b.2).abs() < 1e-8, "second edit keeps source geometry");
+    }
+}
+
+#[test]
+fn kerned_word_jitter_edits_preserve_every_glyph() {
+    let content = "BT /F1 24 Tf 72 700 Td 0.001 Tc -0.002 Tw [(Sect) 3 (ion 1 )] TJ 0 Tc 0 Tw (- ) Tj (Main Heading) Tj ET";
+    for paragraph in [false, true] {
+        check_positioned_geometry(content, "1", "2", paragraph);
+    }
+}
+
+#[test]
+fn kerned_word_jitter_preview_matches_apply_without_mutating_source() {
+    let mut doc = fixture("BT /F1 24 Tf 72 700 Td 0.001 Tc -0.002 Tw [(Sect) 3 (ion 1 )] TJ 0 Tc 0 Tw (- ) Tj (Main Heading) Tj ET");
+    let saved = write_full(&doc, &SaveOptions::default()).unwrap();
+    let draft = "Section 2 - Main Heading";
+    let layout = pdfcraft_edit::text::text_edit_layout(&doc, 0, 0, draft, &Default::default()).unwrap();
+    assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), saved, "preview must not mutate the source");
+    assert_eq!(layout.source_rect, text_blocks(&doc, 0).unwrap()[0].rect);
+    assert!(!layout.overflow);
+    replace_block(&mut doc, 0, 0, draft).unwrap();
+    let after = reopen(&doc);
+    let blocks = text_blocks(&after, 0).unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].editor_text, draft);
+    assert_eq!(layout.draft_rect, Some(blocks[0].rect), "preview bounds must match the applied, saved edit");
+}
+
+#[test]
+fn positioned_mixed_runs_keep_signed_numeric_only_and_sentinel_gaps() {
+    let cases = [
+        "BT /F1 24 Tf 72 700 Td (A ) Tj 3 Tc [(t) -100 (ai) 100 (l)] TJ ET",
+        "BT /F1 24 Tf 72 700 Td (A ) Tj 60 Tz [3] TJ 100 Tz 0.001 Tc (tail) Tj ET",
+        "BT /F1 24 Tf 72 700 Td [7 (X A )] TJ [] TJ [()] TJ 0.001 Tc [(tail) -8] TJ ET",
+        "q 100000 0 0 1 0 0 cm BT /F1 24 Tf 0.00001 0 0 1 0.00072 700 Tm (A ) Tj 0.0000001 Tc [(ta) 0.00001 (il)] TJ ET Q",
+        r"BT /F1 24 Tf 72 700 Td (A ) Tj 0.001 Tc [(caf\351) 3 (teria)] TJ ET",
+        "BT /F1 24 Tf 72 700 Td (A ) Tj 0.001 Tc [(ta) 3 (il)] TJ /F1 30 Tf ( NEXT) Tj ET",
+    ];
+    for (index, content) in cases.iter().enumerate() {
+        for paragraph in [false, true] {
+            if index == 5 && paragraph {
+                continue;
+            } // Its unselected same-BT neighbour remains unsupported for paragraph replacement.
+            check_positioned_geometry(content, "A", "B", paragraph);
+        }
+    }
+}
+
+#[test]
+fn positioned_boundaries_follow_retained_glyph_identity_not_inherited_style() {
+    for paragraph in [false, true] {
+        for (replacement, expected) in [("ab rail", vec![10.0]), ("axb tail", vec![]), ("a tail", vec![]), ("zb tail", vec![])] {
+            let mut doc = fixture("BT /F1 24 Tf 72 700 Td [(a) 10 (b)] TJ 0.001 Tc ( tail) Tj ET");
+            if paragraph {
+                replace_block(&mut doc, 0, 0, replacement).unwrap();
+            } else {
+                replace_line(&mut doc, 0, 0, replacement).unwrap();
+            }
+            let numbers = tj_numbers(&reopen(&doc));
+            assert_eq!(numbers.len(), expected.len(), "{replacement}, paragraph={paragraph}: {numbers:?}");
+            assert!(numbers.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-10));
+        }
+        for (replacement, expected) in [("X ab rail", vec![5.0, 6.0]), ("zX ab tail", vec![6.0]), ("X ab tailz", vec![5.0])] {
+            let mut doc = fixture("BT /F1 24 Tf 72 700 Td [5 (X ab)] TJ 0.001 Tc [( tail) 6] TJ ET");
+            if paragraph {
+                replace_block(&mut doc, 0, 0, replacement).unwrap();
+            } else {
+                replace_line(&mut doc, 0, 0, replacement).unwrap();
+            }
+            let numbers = tj_numbers(&reopen(&doc));
+            assert_eq!(numbers.len(), expected.len(), "sentinel {replacement}, paragraph={paragraph}: {numbers:?}");
+            assert!(numbers.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-10));
+        }
+    }
+}
+
+#[test]
+fn positioned_paragraph_wrap_drops_only_separated_pair_gap() {
+    let mut doc = fixture("BT /F1 24 Tf 72 700 Td [(A ) -100 (tail)] TJ 0.001 Tc ( end) Tj ET");
+    let replacement = format!("{}w1de A tail end", "wide ".repeat(7));
+    replace_block(&mut doc, 0, 0, &replacement).unwrap();
+    let after = reopen(&doc);
+    let positions = glyph_positions(&after);
+    let tail = positions.iter().find(|point| point.0 == 't').copied().unwrap();
+    assert!((tail.1 - 72.0).abs() < 1e-8 && tail.2 < 700.0, "wrapped tail starts at the row origin: {tail:?}");
+    assert!(tj_numbers(&after).is_empty(), "the old pair no longer shares a row");
+}
+
+#[test]
+fn positioned_source_limits_and_formatting_refuse_atomically() {
+    use pdfcraft_edit::text::{BlockStyle, rewrite_block};
+    let many = "1 -1 ".repeat(50_001);
+    for content in [
+        format!("BT /F1 24 Tf 72 700 Td (A ) Tj 0.001 Tc [(tail) {many}] TJ ET"),
+        "BT /F1 24 Tf 72 700 Td [(A) 3 ( tail)] TJ 0.001 Tc ( end) Tj ET".to_string(),
+    ] {
+        let mut doc = fixture(&content);
+        let before = write_full(&doc, &SaveOptions::default()).unwrap();
+        if content.len() > 100_000 {
+            assert!(replace_line(&mut doc, 0, 0, "B tail").is_err());
+        } else {
+            assert!(rewrite_block(&mut doc, 0, 0, Some("B tail end"), &BlockStyle { size: Some(30.0), ..BlockStyle::default() }).is_err());
+        }
+        assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), before);
+    }
+}
+
+#[test]
+fn positioned_source_alias_codes_and_inferred_tracking_refuse_atomically() {
+    use pdfcraft_cos::{Dict, Object};
+    for paragraph in [false, true] {
+        let mut alias = fixture("BT /F1 24 Tf 72 700 Td (A ) Tj 0.001 Tc [(B) 3 (tail)] TJ ET");
+        alias
+            .update_dict(pdfcraft_cos::ObjRef::new(5, 0), |font| {
+                let mut encoding = Dict::new();
+                encoding.set(b"BaseEncoding".to_vec(), Object::name("WinAnsiEncoding"));
+                encoding.set(b"Differences".to_vec(), Object::Array(vec![Object::Int(65), Object::name("A"), Object::name("A")]));
+                font.set(b"Encoding".to_vec(), Object::Dict(encoding));
+                font.set(b"FirstChar".to_vec(), Object::Int(65));
+                font.set(b"LastChar".to_vec(), Object::Int(66));
+                font.set(b"Widths".to_vec(), Object::Array(vec![Object::Int(500), Object::Int(1000)]));
+            })
+            .unwrap();
+        let tracking = fixture("BT /F1 24 Tf 72 700 Td 0.001 Tc [(A) -300 (B) -300 (C) -300 (D)] TJ 0 Tc (X) Tj ET");
+        for mut doc in [alias, tracking] {
+            let before = write_full(&doc, &SaveOptions::default()).unwrap();
+            let result = if paragraph { replace_block(&mut doc, 0, 0, "ABCX") } else { replace_line(&mut doc, 0, 0, "ABCX") };
+            assert!(result.is_err());
+            assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn positioned_long_runs_and_outside_numeric_prefix_keep_geometry() {
+    let long = format!("BT /F1 1 Tf 72 700 Td (A ) Tj 0.001 Tc [{}] TJ ET", "(x) 0.00001 ".repeat(2000));
+    let prefix = "BT /F1 24 Tf 72 700 Td [3] TJ (A ) Tj 0.001 Tc [(ta) 3 (il)] TJ ET";
+    let anisotropic = "q 100 0 0 1 0 0 cm BT /F1 1 Tf 0.72 700 Td (A ) Tj 0.001 Tc [(ta) -3 (il)] TJ ET Q";
+    let tiny_vertical = "q 1000 0 0 1 0 0 cm BT /F1 0.024 Tf 0.072 700 Td (A ) Tj 0.000001 Tc [(ta) 3 (il)] TJ ET Q";
+    for content in [long.as_str(), prefix, anisotropic, tiny_vertical] {
+        for paragraph in [false, true] {
+            check_positioned_geometry(content, "A", "B", paragraph);
+        }
+    }
+}
+
+#[test]
+fn positioned_multi_style_row_refuses_without_reassigning_boundary_ownership() {
+    let mut doc = fixture("BT /F1 24 Tf 72 700 Td (Other ) Tj 1 0 0 rg 0.001 Tc [(A) 3 ( tail)] TJ 0 Tc ( end) Tj ET");
+    assert!(text_lines(&doc, 0).unwrap().len() > 1);
+    assert_eq!(text_blocks(&doc, 0).unwrap().len(), 1);
+    let before = write_full(&doc, &SaveOptions::default()).unwrap();
+    assert!(replace_block(&mut doc, 0, 0, "Oth A tail end").is_err());
+    assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), before);
+}
+
+#[test]
+fn positioned_quote_entry_and_other_row_keep_geometry() {
+    let cases = [
+        "BT /F1 24 Tf 24 TL 72 724 Td (A ) ' 0.001 Tc [(ta) 3 (il)] TJ ET",
+        r#"BT /F1 24 Tf 24 TL 72 724 Td 0.002 0.001 (A ) " 0.002 Tc [(ta) 3 (il)] TJ ET"#,
+        "BT /F1 24 Tf 24 TL 72 700 Td (A ) Tj 3 Tc (tail) Tj 0 Tc T* [(Other) -100 (row)] TJ ET",
+    ];
+    for content in cases {
+        for paragraph in [false, true] {
+            check_positioned_geometry(content, "A", "B", paragraph);
+        }
     }
 }

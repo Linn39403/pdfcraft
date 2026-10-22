@@ -244,8 +244,10 @@ pub(super) fn rewrite_styled_block(
     lines: &[TextLine],
     text: Option<&str>,
     style: &BlockStyle,
-    semantic_drops: Option<&std::collections::HashSet<usize>>,
+    exact: Option<(&std::collections::HashSet<usize>, &TextPositioning)>,
 ) -> Result<LineEdit, EditError> {
+    let semantic_drops = exact.map(|(drops, _)| drops);
+    let mut positioning = exact.map(|(_, positioning)| positioning.clone()).unwrap_or_default();
     let exact_spacing = semantic_drops.is_some();
     let state_ops = |state: &TextState| {
         let mut ops = state.ops();
@@ -415,9 +417,10 @@ pub(super) fn rewrite_styled_block(
     let mut programs: HashMap<String, Option<std::sync::Arc<Vec<u8>>>> = HashMap::new();
     for (range, index) in styled_spans {
         let source = lines.get(index).unwrap_or(first);
-        for ch in draft.get(range).unwrap_or_default().chars() {
+        for (offset, ch) in draft.get(range.clone()).unwrap_or_default().char_indices() {
+            let byte = range.start.saturating_add(offset);
             if ch == '\n' {
-                chars.push((ch, index, source.font.clone()));
+                chars.push((ch, index, source.font.clone(), byte));
                 continue;
             }
             let s = ch.to_string();
@@ -475,7 +478,7 @@ pub(super) fn rewrite_styled_block(
                 if needs_type3(&s) {
                     let key = (source.base_font.rsplit('+').next().unwrap_or(&source.base_font).to_owned(), ch);
                     if let Some(name) = fallback_names.get(&key) {
-                        chars.push((ch, index, name.clone()));
+                        chars.push((ch, index, name.clone(), byte));
                         continue;
                     }
                     if fallback_names.len() >= MAX_TYPE3_GLYPHS {
@@ -505,7 +508,7 @@ pub(super) fn rewrite_styled_block(
                     name
                 }
             };
-            chars.push((ch, index, name));
+            chars.push((ch, index, name, byte));
         }
     }
     let size_of = |source: &TextLine, index: usize| {
@@ -558,7 +561,7 @@ pub(super) fn rewrite_styled_block(
             calibration.insert(index, factor);
         }
     }
-    let advance = |item: &(char, usize, String)| -> f64 {
+    let advance = |item: &(char, usize, String, usize), positioning: &TextPositioning| -> f64 {
         let source = lines.get(item.1).unwrap_or(first);
         let Some(m) = metrics.get(&item.2) else { return 0.0 };
         source_width(
@@ -575,8 +578,9 @@ pub(super) fn rewrite_styled_block(
         ) * overrides.get(&item.1).and_then(|r| r.scale).or(style.scale).map_or(source.origin.state.scale, |s| (s / 100.0).clamp(0.1, 10.0))
             * across_of(source)
             * calibration.get(&item.1).copied().unwrap_or(1.0)
+            + positioning.advance(item.3, item.0)
     };
-    let measure = |items: &[(char, usize, String)]| -> Result<f64, EditError> {
+    let measure = |items: &[(char, usize, String, usize)], positioning: &TextPositioning| -> Result<f64, EditError> {
         let mut width = 0.0;
         let mut at = 0;
         while let Some(item) = items.get(at) {
@@ -601,13 +605,16 @@ pub(super) fn rewrite_styled_block(
                     * scale
                     * source.origin.k;
             } else {
-                width += segment.iter().map(&advance).sum::<f64>();
+                width += segment.iter().map(|item| advance(item, positioning)).sum::<f64>();
             }
             at = end;
         }
+        if let Some(last) = items.last() {
+            width -= positioning.internal_after(last.3, last.0);
+        }
         Ok(width)
     };
-    let mut rows: Vec<Vec<(char, usize, String)>> = Vec::new();
+    let mut rows: Vec<Vec<(char, usize, String, usize)>> = Vec::new();
     // Each row's characters, as indexes into the draft's characters (`chars` holds all of them).
     let mut row_ranges = Vec::new();
     let mut row_start = 0;
@@ -636,23 +643,35 @@ pub(super) fn rewrite_styled_block(
             }
         }
         let word = chars.get(at..end).unwrap_or_default();
-        let w = measure(word)?;
-        if !row.is_empty() && !item.0.is_whitespace() && row_width + w > width + 0.5 {
-            while row.last().is_some_and(|c: &(char, usize, String)| c.0.is_whitespace()) {
+        let w = measure(word, &positioning)?;
+        let mut bridge = row.last().map_or(0.0, |last: &(char, usize, String, usize)| positioning.internal_after(last.3, last.0));
+        if !row.is_empty() && !item.0.is_whitespace() && row_width + bridge + w > width + 0.5 {
+            while row.last().is_some_and(|c: &(char, usize, String, usize)| c.0.is_whitespace()) {
                 row.pop();
             }
             row_ranges.push(row_start..row_start + row.len());
             rows.push(std::mem::take(&mut row));
             row_width = 0.0;
             row_start = at;
+            bridge = 0.0;
         }
         row.extend_from_slice(word);
-        row_width += w;
+        row_width += bridge + w;
         at = end;
     }
     if !row.is_empty() {
         row_ranges.push(row_start..row_start + row.len());
         rows.push(row);
+    }
+    // A retained pair separated by wrapping is no longer adjacent on the page. Drop its
+    // internal gap from both final measurement and emission, not just from the next row.
+    for row in &rows {
+        if let Some(last) = row.last() {
+            let end = last.3.saturating_add(last.0.len_utf8());
+            if !positioning.ends.contains(&end) {
+                positioning.after.remove(&end);
+            }
+        }
     }
     let streams = content_streams(doc, &p.dict);
     let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
@@ -691,7 +710,7 @@ pub(super) fn rewrite_styled_block(
             ));
         }
     }
-    let measured: Vec<_> = rows.iter().map(|r| measure(r)).collect::<Result<_, _>>()?;
+    let measured: Vec<_> = rows.iter().map(|r| measure(r, &positioning)).collect::<Result<_, _>>()?;
     let mut shaped_runs = HashMap::new();
     let mut segment_advances = HashMap::new();
     for (row_index, row) in rows.iter().enumerate().filter(|(r, _)| !kept.get(*r).copied().unwrap_or(false)) {
@@ -701,7 +720,8 @@ pub(super) fn rewrite_styled_block(
             while row.get(end).is_some_and(|v| v.1 == item.1 && v.2 == item.2) {
                 end += 1;
             }
-            segment_advances.insert((row_index, at), row.get(at..end).unwrap_or_default().iter().map(&advance).sum::<f64>());
+            segment_advances
+                .insert((row_index, at), row.get(at..end).unwrap_or_default().iter().map(|item| advance(item, &positioning)).sum::<f64>());
             let string: String = row.get(at..end).unwrap_or_default().iter().map(|v| v.0).collect();
             if let Some((bytes, shaped, family)) = shape_source(doc, &fonts, &item.2, &string)? {
                 shaped_runs.insert((row_index, at), (bytes, shaped, family));
@@ -836,13 +856,14 @@ pub(super) fn rewrite_styled_block(
                 if !exact_spacing || pos == 0 {
                     block_ops.push(Op::new("Tm", tm.iter().map(|v| if exact_spacing { Object::Real(*v) } else { n(*v) }).collect()));
                 }
-                block_ops.extend(source_show(
+                block_ops.extend(positioned_show(
                     m,
                     &string,
-                    size_of(source, item.1),
+                    item.3,
+                    &state,
+                    across_of(source),
                     spaces.borrow().get(&item.2).copied().unwrap_or_else(|| source_space(doc, &fonts, m)),
-                    state.char_spacing,
-                    state.word_spacing,
+                    &positioning,
                 )?);
                 if !exact_spacing {
                     block_ops.push(Op::new("ET", vec![]));
