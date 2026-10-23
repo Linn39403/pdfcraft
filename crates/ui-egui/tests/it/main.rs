@@ -72,3 +72,5 @@ mod updates;
 mod view;
 mod viewer;
 mod xfa;
+
+mod stamp_locale;
