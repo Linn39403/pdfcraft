@@ -3445,6 +3445,7 @@ fn exported_pages_record_the_resolution_they_were_drawn_at() {
     assert!(unit == 2 && (x - used).abs() < 0.01 && (y - used).abs() < 0.01, "{x} × {y}, drawn at {used}");
 }
 
+/// Generates a synthetic one-pixel RGB PNG for image page-validation tests.
 fn add_image_page_test_png() -> Arc<Vec<u8>> {
     let mut bytes = Vec::new();
     {
