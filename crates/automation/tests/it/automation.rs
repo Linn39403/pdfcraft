@@ -9232,3 +9232,53 @@ fn text_paragraphs_report_clipping_eligibility_without_filtering() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// #4806: ActualText's logical replacement must retain clipping from every physical run.
+#[test]
+fn actualtext_clipping_state_reaches_listings_and_refuses_mutations() {
+    let dir = workdir("actualtext-clipping-state");
+    for nested in [false, true] {
+        for mode in [0, 4, 5, 6, 7] {
+            let later = format!("{mode} Tr (MASK) Tj");
+            let later = if nested { format!("/Span << /ActualText (INNER) >> BDC {later} EMC") } else { later };
+            let body = format!(
+                "q /Span << /ActualText (TITLEMASK) >> BDC BT /F1 24 Tf 40 500 Td 0 Tr (TITLE) Tj {later} ET EMC 1 0 0 rg 0 0 612 600 re f Q"
+            );
+            std::fs::write(dir.join("actualtext.pdf"), win_ansi_paragraph_pdf(&body)).unwrap();
+            for target in ["line", "paragraph"] {
+                let mut a = auto(&dir);
+                let doc = ok(&mut a, "doc_open", json!({"path":"actualtext.pdf"}))["doc"].as_u64().unwrap();
+                let listed = ok(&mut a, "text_paragraphs", json!({"doc":doc,"page":1}));
+                assert_eq!(listed["count"], 1, "nested={nested}, mode={mode}: {listed}");
+                let paragraph = &listed["paragraphs"][0];
+                assert_eq!(paragraph["text"], "TITLEMASK", "logical ActualText remains intact");
+                assert_eq!(paragraph["paragraph"], 1);
+                assert_eq!(paragraph["editable"], mode == 0, "nested={nested}, mode={mode}: {listed}");
+                let mut args = json!({"doc":doc,"page":1,"text":"EDITED"});
+                args[target] = json!(1);
+                if mode == 0 {
+                    assert_eq!(paragraph.get("non_editable_reason"), Some(&Value::Null));
+                    ok(&mut a, "text_edit", args);
+                    let edited = ok(&mut a, "text_paragraphs", json!({"doc":doc,"page":1}));
+                    assert_eq!(edited["paragraphs"][0]["text"], "EDITED", "ordinary ActualText remains editable through {target}");
+                    continue;
+                }
+                assert!(paragraph["non_editable_reason"].as_str().unwrap().contains("clipping path"));
+                let before = ok(&mut a, "doc_info", json!({"doc":doc}));
+                let bytes = a.session().save_bytes(pdfcraft_engine::DocId(doc)).unwrap();
+                let extracted = page_text(&mut a, doc);
+                let rendered = a.call("page_render", &json!({"doc":doc,"page":1,"dpi":36})).unwrap();
+                let refused = err(&mut a, "text_edit", args);
+                assert!(refused.to_string().contains("clipping path"), "nested={nested}, mode={mode}, {target}: {refused}");
+                let preview = err(&mut a, "page_render", json!({"doc":doc,"page":1,"hide_text_block":1,"dpi":36}));
+                assert!(preview.to_string().contains("clipping path"), "{preview}");
+                assert_eq!(a.session().save_bytes(pdfcraft_engine::DocId(doc)).unwrap(), bytes, "refusal changes no bytes");
+                assert_eq!(ok(&mut a, "doc_info", json!({"doc":doc})), before, "refusal preserves history and dirty state");
+                assert_eq!(page_text(&mut a, doc), extracted, "logical extraction is unchanged");
+                assert_eq!(ok(&mut a, "text_paragraphs", json!({"doc":doc,"page":1})), listed);
+                assert_eq!(a.call("page_render", &json!({"doc":doc,"page":1,"dpi":36})).unwrap(), rendered, "the artwork stays masked");
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

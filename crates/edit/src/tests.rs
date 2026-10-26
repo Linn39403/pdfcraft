@@ -7513,3 +7513,33 @@ fn paragraph_listing_keeps_ordinary_path_clipped_text_eligible() {
     assert_eq!(blocks[0].text, "PLAIN");
     assert_eq!(blocks[0].non_editable_reason, None);
 }
+
+/// ActualText collapses several glyph runs, but must retain every run's clipping hazard.
+#[test]
+fn actual_text_keeps_later_clipping_runs_and_refuses_without_changes() {
+    for mode in 4..=7 {
+        for nested in [false, true] {
+            let mask = format!("{mode} Tr (MASK) Tj");
+            let mask = if nested { format!("/Span << /ActualText (inner) >> BDC {mask} EMC") } else { mask };
+            let content = format!(
+                "q /Span << /ActualText (logical text) >> BDC BT /F1 48 Tf 40 60 Td 0 Tr (TITLE) Tj {mask} ET EMC 1 0 0 rg 0 0 300 150 re f Q"
+            );
+            let mut doc = text_page(&content);
+            let before = pdfcraft_cos::write_full(&doc, &SaveOptions::default()).unwrap();
+            let lines = text::text_lines(&doc, 0).unwrap();
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].text, "logical text");
+            let blocks = text::text_blocks(&doc, 0).unwrap();
+            assert_eq!(blocks.len(), 1);
+            assert!(blocks[0].non_editable_reason.as_deref().unwrap().contains("clipping path"));
+            for result in [
+                text::replace_line(&mut doc, 0, 0, "EDITED").map(|_| ()),
+                text::rewrite_block(&mut doc, 0, 0, Some("EDITED"), &BlockStyle::default()).map(|_| ()),
+                text::clear_block(&mut doc, 0, 0),
+            ] {
+                assert!(matches!(result, Err(EditError::Invalid(ref reason)) if reason.contains("clipping path")), "{result:?}");
+                assert_eq!(pdfcraft_cos::write_full(&doc, &SaveOptions::default()).unwrap(), before);
+            }
+        }
+    }
+}

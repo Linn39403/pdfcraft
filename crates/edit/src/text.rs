@@ -903,6 +903,8 @@ struct Shown {
     paint: Paint,
     logical_order: bool,
     actual_text: bool,
+    /// Any represented glyph run adds to the clip, including merged ActualText runs.
+    clips: bool,
 }
 
 impl Shown {
@@ -1126,6 +1128,7 @@ fn interpret(
                     let mut items = tail.into_iter();
                     if let Some(mut first) = items.next() {
                         for shown in items {
+                            first.clips |= shown.clips;
                             first.glyph_count = first.glyph_count.saturating_add(shown.glyph_count);
                             first.extra_ops.push(shown.op);
                             first.extra_ops.extend(shown.extra_ops);
@@ -1444,6 +1447,7 @@ fn interpret(
                     paint: Paint { layers: layers.iter().flatten().cloned().collect(), gs: ts.gs.clone() },
                     logical_order: false,
                     actual_text: false,
+                    clips: ts.render_mode >= 4,
                 });
             }
             _ => {}
@@ -1531,7 +1535,7 @@ fn text_lines_in(doc: &Document, p: &pdfcraft_model::Page, actual_text: bool) ->
             l.decodable &= s.decodable;
             l.visual_order |= s.visual_order;
             l.actual_text |= s.actual_text;
-            l.clips |= s.state.render_mode >= 4;
+            l.clips |= s.clips;
             if l.unreadable_mode.is_none() {
                 l.unreadable_mode = s.state.unreadable.as_deref().map(str::to_owned);
             }
@@ -1556,7 +1560,7 @@ fn text_lines_in(doc: &Document, p: &pdfcraft_model::Page, actual_text: bool) ->
                 paint: s.paint.clone(),
                 logical_order: s.logical_order,
                 actual_text: s.actual_text,
-                clips: s.state.render_mode >= 4,
+                clips: s.clips,
                 unreadable_mode: s.state.unreadable.as_deref().map(str::to_owned),
                 runs: vec![(s.text.clone(), s.ink.len(), false)],
                 ops: std::iter::once(s.op).chain(s.extra_ops.iter().copied()).collect(),
@@ -1646,7 +1650,7 @@ fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<Pen>, s: Shown, stream
         l.decodable &= s.decodable;
         l.visual_order |= s.visual_order;
         l.actual_text |= s.actual_text;
-        l.clips |= s.state.render_mode >= 4;
+        l.clips |= s.clips;
         if l.unreadable_mode.is_none() {
             l.unreadable_mode = s.state.unreadable.as_deref().map(str::to_owned);
         }
@@ -1670,7 +1674,7 @@ fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<Pen>, s: Shown, stream
             paint: s.paint.clone(),
             logical_order: s.logical_order,
             actual_text: s.actual_text,
-            clips: s.state.render_mode >= 4,
+            clips: s.clips,
             unreadable_mode: s.state.unreadable.as_deref().map(str::to_owned),
             runs: vec![(s.text.clone(), s.ink.len(), false)],
             ops: std::iter::once(s.op).chain(s.extra_ops.iter().copied()).collect(),
@@ -2597,18 +2601,145 @@ fn font_size_before(ops: &[Op], at: usize) -> Option<f64> {
 /// share box area when the leading is tighter than the font's ascent plus descent; its baseline
 /// is farther away, so it stays.
 fn coincident_ops(lines: &[TextLine], targets: &[&TextLine]) -> std::collections::HashSet<usize> {
-    let area = |r: [f64; 4]| ((r[2] - r[0]) * (r[3] - r[1])).max(0.0);
     let mut drop = std::collections::HashSet::new();
     for line in lines {
-        let copy = targets.iter().any(|target| {
-            let same_text = line.text.trim() == target.text.trim() || (line.origin.state.render_mode == 3) != (target.origin.state.render_mode == 3);
-            same_text && overlaps_half(line.rect, target.rect, area) && on_same_baseline(line, target)
-        });
+        let copy = targets.iter().any(|target| coincident_line(line, target));
         if copy {
             drop.extend(line.ops.iter().copied());
         }
     }
     drop
+}
+
+/// The exact copy predicate shared by rewrite drop sets and eligibility preflight.
+fn coincident_line(line: &TextLine, target: &TextLine) -> bool {
+    let area = |r: [f64; 4]| ((r[2] - r[0]) * (r[3] - r[1])).max(0.0);
+    let same_text = line.text.trim() == target.text.trim() || (line.origin.state.render_mode == 3) != (target.origin.state.render_mode == 3);
+    same_text && overlaps_half(line.rect, target.rect, area) && on_same_baseline(line, target)
+}
+
+/// A balanced spatial tree of lines whose operators would remove a clipping run.
+/// Only finite, ordered boxes enter the tree; unusual boxes use the exact fallback.
+struct ClippingNode<'a> {
+    rect: [f64; 4],
+    lines: Vec<&'a TextLine>,
+    children: Option<(Box<Self>, Box<Self>)>,
+}
+
+impl<'a> ClippingNode<'a> {
+    /// Halving each level bounds depth by log2(MAX_LINES); storage is linear.
+    fn build(mut lines: Vec<&'a TextLine>) -> Option<Self> {
+        let mut rect = lines.first()?.rect;
+        for line in &lines {
+            rect = [rect[0].min(line.rect[0]), rect[1].min(line.rect[1]), rect[2].max(line.rect[2]), rect[3].max(line.rect[3])];
+        }
+        if lines.len() <= 8 {
+            return Some(Self { rect, lines, children: None });
+        }
+        let axis = usize::from(rect[3] - rect[1] > rect[2] - rect[0]);
+        lines.sort_unstable_by(|a, b| a.rect.get(axis).zip(b.rect.get(axis)).map_or(std::cmp::Ordering::Equal, |(a, b)| a.total_cmp(b)));
+        // The midpoint is always within this vector, and each child is strictly smaller.
+        let right = lines.split_off(lines.len() / 2);
+        let children = Some((Box::new(Self::build(lines)?), Box::new(Self::build(right)?)));
+        Some(Self { rect, lines: Vec::new(), children })
+    }
+
+    /// Conservative box pruning followed by the rewrite's exact predicate.
+    fn matches(&self, target: &TextLine, remaining: &mut usize) -> Result<bool, ()> {
+        *remaining = remaining.checked_sub(1).ok_or(())?;
+        if finite_box(target.rect)
+            && (self.rect[2] <= target.rect[0] || target.rect[2] <= self.rect[0] || self.rect[3] <= target.rect[1] || target.rect[3] <= self.rect[1])
+        {
+            return Ok(false);
+        }
+        for line in &self.lines {
+            *remaining = remaining.checked_sub(1).ok_or(())?;
+            if coincident_line(line, target) {
+                return Ok(true);
+            }
+        }
+        match &self.children {
+            Some((left, right)) => Ok(left.matches(target, remaining)? || right.matches(target, remaining)?),
+            None => Ok(false),
+        }
+    }
+}
+
+/// Whether a box can be safely pruned using ordinary interval intersection.
+fn finite_box(rect: [f64; 4]) -> bool {
+    rect.iter().all(|v| v.is_finite()) && rect[0] <= rect[2] && rect[1] <= rect[3]
+}
+
+const CLIPPING_SCAN_LIMIT_REASON: &str = "text editing eligibility could not be determined safely: clipping comparison limit exceeded";
+
+/// One page's clipping hazard index. Shared operators are included, not only lines
+/// marked `clips`, so this answers exactly the rewrite's operator-intersection question.
+struct ClippingIndex<'a> {
+    ops: std::collections::HashSet<usize>,
+    tree: Option<ClippingNode<'a>>,
+    unusual: Vec<&'a TextLine>,
+    remaining: usize,
+}
+
+impl<'a> ClippingIndex<'a> {
+    /// Caps index allocations and node/predicate visits on hostile pages. Exhaustion is a
+    /// distinct conservative refusal; it never removes text from the extracted listing.
+    fn new(lines: &'a [TextLine]) -> Self {
+        const MAX_LINES: usize = 65_536;
+        const MAX_OPS: usize = 262_144;
+        let mut index = Self { ops: Default::default(), tree: None, unusual: Vec::new(), remaining: 0 };
+        if !lines.iter().any(|line| line.clips) {
+            index.remaining = usize::MAX;
+            return index;
+        }
+        if lines.len() > MAX_LINES {
+            return index;
+        }
+        for op in lines.iter().filter(|line| line.clips).flat_map(|line| &line.ops) {
+            if index.ops.len() >= MAX_OPS {
+                return index;
+            }
+            index.ops.insert(*op);
+        }
+        let mut finite = Vec::new();
+        for line in lines.iter().filter(|line| line.ops.iter().any(|op| index.ops.contains(op))) {
+            if finite_box(line.rect) {
+                finite.push(line);
+            } else {
+                index.unusual.push(line);
+            }
+        }
+        index.tree = ClippingNode::build(finite);
+        index.remaining = lines.len().saturating_mul(128).clamp(1024, 1_000_000);
+        index
+    }
+
+    /// Returns a known refusal, or no clipping hazard. The page budget is shared
+    /// across paragraphs rather than allowing every paragraph its own full scan.
+    fn refusal(&mut self, targets: &[&TextLine]) -> Option<&'static str> {
+        if targets.iter().any(|line| line.clips || line.ops.iter().any(|op| self.ops.contains(op))) {
+            return Some(CLIPPING_TEXT_REASON);
+        }
+        if self.remaining == 0 {
+            return Some(CLIPPING_SCAN_LIMIT_REASON);
+        }
+        for target in targets {
+            let found = self.tree.as_ref().map_or(Ok(false), |tree| tree.matches(target, &mut self.remaining));
+            match found {
+                Ok(true) => return Some(CLIPPING_TEXT_REASON),
+                Err(()) => return Some(CLIPPING_SCAN_LIMIT_REASON),
+                Ok(false) => {}
+            }
+            for line in &self.unusual {
+                let Some(remaining) = self.remaining.checked_sub(1) else { return Some(CLIPPING_SCAN_LIMIT_REASON) };
+                self.remaining = remaining;
+                if coincident_line(line, target) {
+                    return Some(CLIPPING_TEXT_REASON);
+                }
+            }
+        }
+        None
+    }
 }
 
 fn overlaps_half(a: [f64; 4], b: [f64; 4], area: impl Fn([f64; 4]) -> f64) -> bool {
@@ -2690,23 +2821,13 @@ pub fn block_overlapping(blocks: &[TextBlock], rect: [f64; 4]) -> Option<usize> 
 pub fn text_blocks(doc: &Document, page: usize) -> Result<Vec<TextBlock>, EditError> {
     let lines = text_lines(doc, page)?;
     let mut blocks = group_blocks(&lines);
-    let has_clipping_text = lines.iter().any(|line| line.clips);
+    let mut clipping = ClippingIndex::new(&lines);
     for block in &mut blocks {
         let members: Vec<&TextLine> = block.lines.iter().filter_map(|i| lines.get(*i)).collect();
-        // Use the rewrite's exact drop set: a mask can share an ink run, or be a separate
-        // coincident copy. Skip the page-wide copy search when there is no mask to remove.
-        let clipping = if members.iter().any(|line| line.clips) {
-            // A direct mask always belongs to the drop set. Avoid a page-wide copy search
-            // for every paragraph on all-mask exports.
-            Some(EditError::Invalid(CLIPPING_TEXT_REASON.into()))
-        } else if has_clipping_text {
-            let mut dropped = coincident_ops(&lines, &members);
-            dropped.extend(members.iter().flat_map(|line| line.ops.iter().copied()));
-            refuse_clipping_text(&lines, &dropped).err()
-        } else {
-            None
-        };
-        block.non_editable_reason = clipping.map(|error| error.to_string()).or_else(|| members.iter().find_map(|line| line.unreadable_mode.clone()));
+        block.non_editable_reason = clipping
+            .refusal(&members)
+            .map(|reason| EditError::Invalid(reason.into()).to_string())
+            .or_else(|| members.iter().find_map(|line| line.unreadable_mode.clone()));
     }
     Ok(blocks)
 }
@@ -3554,6 +3675,172 @@ pub(crate) fn translate_blocks(doc: &mut Document, page: usize, indexes: &[usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A contributor-original single-font page, generated in memory.
+    fn eligibility_page(content: &str) -> Document {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_owned(),
+        ];
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+        Document::open(std::sync::Arc::new(bytes)).unwrap()
+    }
+
+    /// Independent line positions/operators keep performance tests free of grouping costs.
+    fn eligibility_lines(count: usize) -> Vec<TextLine> {
+        let doc = eligibility_page("BT /F1 12 Tf 40 60 Td (sample) Tj ET");
+        let template = text_lines(&doc, 0).unwrap().remove(0);
+        (0..count)
+            .map(|i| {
+                let mut line = template.clone();
+                let y = i as f64 * 30.0;
+                line.rect = [40.0, y, 90.0, y + 12.0];
+                line.origin.baseline = y;
+                line.ops = vec![i];
+                line
+            })
+            .collect()
+    }
+
+    /// One mask must not trigger one full-page copy search per ordinary paragraph.
+    #[test]
+    fn clipping_index_one_mask_work_is_linear() {
+        let work = |count| {
+            let mut lines = eligibility_lines(count);
+            lines[0].clips = true;
+            let mut index = ClippingIndex::new(&lines);
+            let before = index.remaining;
+            for line in &lines[1..] {
+                assert_eq!(index.refusal(&[line]), None);
+            }
+            before - index.remaining
+        };
+        let small = work(1024);
+        let large = work(2048);
+        assert!(small <= 1024 && large <= small * 2 + 2, "{small} -> {large}");
+    }
+
+    /// Spatial pruning also bounds work when a page has many noncoincident masks.
+    #[test]
+    fn clipping_index_many_separated_masks_uses_spatial_pruning() {
+        let mut lines = eligibility_lines(4096);
+        for (i, line) in lines.iter_mut().enumerate() {
+            line.clips = i % 2 == 0;
+        }
+        let mut index = ClippingIndex::new(&lines);
+        let before = index.remaining;
+        for line in lines.iter().filter(|line| !line.clips) {
+            assert_eq!(index.refusal(&[line]), None);
+        }
+        assert!(before - index.remaining < lines.len() * 32);
+    }
+
+    /// Compare with the original operator-set oracle, including invisible copies with
+    /// different text, shared operators, mixed modes and nonfinite geometry.
+    #[test]
+    fn clipping_index_agrees_with_rewrite_drop_sets() {
+        let mut lines = eligibility_lines(160);
+        for (i, line) in lines.iter_mut().enumerate() {
+            let y = (i % 20) as f64 * 30.0;
+            line.rect = [40.0, y, 90.0, y + 12.0];
+            line.origin.baseline = y + (i % 3) as f64;
+            line.text = format!("word {}", i % 7);
+            line.origin.state.render_mode = (i % 8) as i64;
+            line.clips = i % 11 == 0;
+            line.size = 8.0 + (i % 5) as f64;
+            if i % 13 == 0 {
+                line.ops.push(0);
+            }
+            if i % 17 == 0 {
+                line.rect[0] = f64::NAN;
+            }
+            if i % 19 == 0 {
+                line.rect[2] = f64::INFINITY;
+            }
+            if i % 23 == 0 {
+                line.rect.swap(0, 2);
+            }
+            if i % 29 == 0 {
+                line.origin.tm = [0.0, 1.0, -1.0, 0.0, 0.0, 0.0];
+            }
+        }
+        let mut index = ClippingIndex::new(&lines);
+        for targets in lines.chunks(2) {
+            let targets: Vec<_> = targets.iter().collect();
+            let mut drops = coincident_ops(&lines, &targets);
+            drops.extend(targets.iter().flat_map(|line| line.ops.iter().copied()));
+            let expected = refuse_clipping_text(&lines, &drops).err().map(|_| CLIPPING_TEXT_REASON);
+            assert_eq!(index.refusal(&targets), expected);
+        }
+        // A differently-worded invisible copy is still coincident with visible clipping text.
+        let mut lines = eligibility_lines(2);
+        lines[0].clips = true;
+        lines[1].rect = lines[0].rect;
+        lines[1].origin.baseline = lines[0].origin.baseline;
+        lines[1].origin.state.render_mode = 3;
+        lines[1].text = "different OCR text".into();
+        assert_eq!(ClippingIndex::new(&lines).refusal(&[&lines[1]]), Some(CLIPPING_TEXT_REASON));
+    }
+
+    /// A nonmask copy can indirectly drop a mask through a shared operator ID.
+    #[test]
+    fn clipping_index_includes_indirect_shared_operator_copies() {
+        let mut lines = eligibility_lines(3);
+        lines[0].clips = true;
+        lines[1].ops.push(0);
+        lines[2].rect = lines[1].rect;
+        lines[2].origin.baseline = lines[1].origin.baseline;
+        assert!(!coincident_line(&lines[0], &lines[2]));
+        assert!(coincident_line(&lines[1], &lines[2]));
+        let drops = coincident_ops(&lines, &[&lines[2]]);
+        assert!(refuse_clipping_text(&lines, &drops).is_err());
+        assert_eq!(ClippingIndex::new(&lines).refusal(&[&lines[2]]), Some(CLIPPING_TEXT_REASON));
+    }
+
+    /// A dense adversarial page cannot spend an unbounded amount of work proving safety.
+    #[test]
+    fn clipping_index_budget_exhaustion_is_explicit_and_conservative() {
+        let mut lines = eligibility_lines(100);
+        for (i, line) in lines.iter_mut().enumerate() {
+            line.rect = [40.0, 60.0, 90.0, 72.0];
+            line.origin.baseline = 60.0;
+            line.clips = i < 99;
+            line.text = format!("unique {i}");
+        }
+        let mut index = ClippingIndex::new(&lines);
+        index.remaining = 10;
+        assert_eq!(index.refusal(&[&lines[99]]), Some(CLIPPING_SCAN_LIMIT_REASON));
+        assert_eq!(index.remaining, 0);
+        assert_eq!(index.refusal(&[&lines[99]]), Some(CLIPPING_SCAN_LIMIT_REASON));
+        assert_eq!(index.refusal(&[&lines[0]]), Some(CLIPPING_TEXT_REASON));
+    }
+
+    /// The form-aware reading path must propagate every ActualText run's mask flag too.
+    #[test]
+    fn reading_lines_keeps_later_actual_text_clipping_runs() {
+        for mode in 4..=7 {
+            let doc = eligibility_page(&format!("/Span << /ActualText (logical) >> BDC BT /F1 12 Tf 40 60 Td (ink) Tj {mode} Tr (mask) Tj ET EMC"));
+            let (lines, truncated) = reading_lines(&doc, 0).unwrap();
+            assert!(!truncated);
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].text, "logical");
+            assert!(lines[0].clips, "mode {mode}");
+        }
+    }
 
     /// A synthetic paragraph for key matching and overlap tests.
     fn block(text: &str, rect: [f64; 4]) -> TextBlock {

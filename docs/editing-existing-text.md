@@ -14,7 +14,10 @@ Text that defines a clipping path (`4 Tr` through `7 Tr`) remains available to t
 extraction, but is not offered as an editable paragraph: removing its glyphs would remove
 the mask shaping the artwork. Hovering it explains why without opening an editor or changing
 the document. The same restriction applies when an ordinary run shares a paragraph with a
-mask, or its replacement would remove a coincident mask. This is distinct from ordinary text
+mask, or its replacement would remove a coincident mask. This includes masks inside
+`/ActualText` spans, even when the first glyph run paints ordinary text. Dense pages
+that exceed the bounded clipping lookup report an explicit eligibility-limit reason
+instead of offering an editor whose safety could not be established. This is distinct from ordinary text
 painted inside an existing path clip. `text_paragraphs` preserves all paragraph numbers and
 reports `editable` and `non_editable_reason`; eligibility is a preflight check, not a promise
 that every replacement font, character or style can be supported.
