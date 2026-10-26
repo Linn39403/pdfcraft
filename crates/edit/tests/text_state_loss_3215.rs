@@ -745,3 +745,82 @@ fn positioned_quote_entry_and_other_row_keep_geometry() {
         }
     }
 }
+
+#[test]
+fn cached_text_session_keeps_mixed_spacing_across_repeated_drafts() {
+    let mut doc = fixture("BT /F1 24 Tf 72 700 Td 0.001 Tc -0.002 Tw [(Sect) 3 (ion 1 )] TJ 0 Tc 0 Tw (- ) Tj (Main Heading) Tj ET");
+    let saved = write_full(&doc, &SaveOptions::default()).unwrap();
+    let session = pdfcraft_edit::text::TextSession::open(&doc, 0, 0).unwrap();
+    let draft = "Section 2 - Main Heading";
+    let first = session.layout(draft, &Default::default()).unwrap();
+    session.layout("Section 3 - Main Heading", &Default::default()).unwrap();
+    let repeated = session.layout(draft, &Default::default()).unwrap();
+    assert_eq!(first.draft_rect, repeated.draft_rect);
+    assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), saved);
+    session.commit(&mut doc, Some(draft), &Default::default()).unwrap();
+    let after = reopen(&doc);
+    let blocks = text_blocks(&after, 0).unwrap();
+    assert_eq!(blocks[0].editor_text, draft);
+    assert_eq!(first.draft_rect, Some(blocks[0].rect));
+    let changed = write_full(&doc, &SaveOptions::default()).unwrap();
+    assert!(session.commit(&mut doc, Some("Section 4 - Main Heading"), &Default::default()).is_err());
+    assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), changed);
+}
+
+#[test]
+fn mixed_spacing_underlines_restate_inner_text_paint_after_save() {
+    use pdfcraft_cos::{Dict, ObjRef, Object};
+    use pdfcraft_edit::text::{BlockStyle, rewrite_block};
+    let mut doc = fixture("BT /GS1 gs /F1 24 Tf 72 700 Td (A ) Tj 0.001 Tc 95 Tz (tail) Tj ET");
+    doc.update_dict(ObjRef::new(3, 0), |page| {
+        let Object::Dict(resources) = page.get_mut(b"Resources").unwrap() else { panic!("resources") };
+        let mut paint = Dict::new();
+        paint.set(b"CA".to_vec(), Object::Real(0.25));
+        let mut states = Dict::new();
+        states.set(b"GS1".to_vec(), Object::Dict(paint));
+        resources.set(b"ExtGState".to_vec(), Object::Dict(states));
+    })
+    .unwrap();
+    rewrite_block(&mut doc, 0, 0, Some("B tail"), &BlockStyle { underline: Some(true), ..Default::default() }).unwrap();
+    let saved = reopen(&doc);
+    let mut state = None;
+    let mut stack = Vec::new();
+    let mut strokes = 0;
+    for op in pdfcraft_content::parse(&content_bytes(&saved)).ops {
+        match op.op.as_slice() {
+            b"q" => stack.push(state.clone()),
+            b"Q" => state = stack.pop().unwrap(),
+            b"gs" => state = op.name(0).map(<[u8]>::to_vec),
+            b"S" => {
+                assert_eq!(state.as_deref(), Some(b"GS1".as_slice()), "underline retains source stroke alpha");
+                strokes += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(strokes >= 2, "both private spacing runs have underlines");
+    assert_eq!(text_blocks(&saved, 0).unwrap()[0].editor_text, "B tail");
+}
+
+#[test]
+fn sequential_text_objects_keep_exact_spacing_in_paragraph_only() {
+    let content = "BT /F1 12 Tf 1 0 0 1 72 700 Tm (for company ) Tj ET \
+        BT /F1 12 Tf 1 0 0 1 141.36 700 Tm (A) Tj ET \
+        BT 0.0001 Tc /F1 12 Tf 1 0 0 1 149.364 700 Tm (EROSOL) Tj ET";
+    let mut doc = fixture(content);
+    let before = write_full(&doc, &SaveOptions::default()).unwrap();
+    assert!(replace_line(&mut doc, 0, 0, "for companies AEROSOL").is_err(), "line splices cannot consume later absolute matrices");
+    assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), before);
+    replace_block(&mut doc, 0, 0, "for companies AEROSOL").unwrap();
+    let saved = reopen(&doc);
+    assert_eq!(text_blocks(&saved, 0).unwrap()[0].editor_text, "for companies AEROSOL");
+    let states = character_states(&saved);
+    let text: String = states.iter().map(|s| s.0).collect();
+    let at = text.find("EROSOL").unwrap();
+    assert!(states[at..at + 6].iter().all(|s| s.1 == 0.0001), "authored tiny spacing remains exact: {states:?}");
+
+    let mut manual = fixture(&content.replace("(A) Tj ET", "(A) Tj 1 0 0 1 149.364 700 Tm (X) Tj ET"));
+    let before = write_full(&manual, &SaveOptions::default()).unwrap();
+    assert!(replace_block(&mut manual, 0, 0, "replacement").is_err());
+    assert_eq!(write_full(&manual, &SaveOptions::default()).unwrap(), before);
+}

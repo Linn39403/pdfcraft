@@ -197,6 +197,18 @@ impl Parser<'_> {
                         b'n' => out.push(b'\n'),
                         b'r' => out.push(b'\r'),
                         b't' => out.push(b'\t'),
+                        b'b' => out.push(0x08),
+                        b'f' => out.push(0x0C),
+                        b'v' => out.push(0x0B),
+                        b'0' => out.push(0),
+                        b'x' => {
+                            let digits = self.s.get(self.i..self.i.checked_add(2)?)?;
+                            let code = hex4(&[b'0', b'0', digits[0], digits[1]])?;
+                            self.i += 2;
+                            let ch = char::from_u32(u32::from(code)).unwrap_or('\u{FFFD}');
+                            let mut encoded = [0u8; 4];
+                            out.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+                        }
                         b'u' => {
                             let code = hex4(self.s.get(self.i..self.i.checked_add(4)?)?)?;
                             self.i += 4;
@@ -367,10 +379,12 @@ pub fn parse_validate(js: &str) -> Option<Validate> {
 }
 
 pub fn parse_calculate(js: &str) -> Option<Calculate> {
-    // Simplified field notation: Acrobat keeps the expression in a comment.
-    if let (Some(a), Some(b)) = (js.find("BVCALC"), js.find("EVCALC")) {
-        let expr = js.get(a + 6..b)?.trim().to_string();
-        return Some(Calculate::Notation(expr));
+    // Simplified field notation: Acrobat keeps the expression in a comment. A script is read for
+    // its comments only when it spells the marker.
+    if js.contains("BVCALC")
+        && let Some(range) = notation_range(js, &js_tokens(js).1)
+    {
+        return Some(Calculate::Notation(js.get(range)?.trim().to_string()));
     }
     let args = call(js, "AFSimple_Calculate")?;
     let op = match args.first().and_then(Arg::string)?.as_str() {
@@ -467,21 +481,41 @@ enum Js {
     Other,
 }
 
+/// A [`Js`] token with its byte range in the script.
+type Token = (Range<usize>, Js);
+
 /// Words after which `/` starts a regular expression instead of dividing.
 const BEFORE_REGEX: [&str; 13] = ["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "instanceof", "yield"];
 
-/// JavaScript's tokens with their byte ranges, comments left out: enough of the language to tell
-/// code from strings, comments and regular expressions. The tokens stop where a string, comment
-/// or template literal never ends.
-fn js_tokens(js: &str) -> Vec<(Range<usize>, Js)> {
+/// Words whose condition, in parentheses, comes before a statement, so a `/` after it starts a
+/// regular expression. The `while` that ends a `do` loop counts too: the loop ends at its `)`, so
+/// a `/` after it starts the next statement, and can't divide.
+const BEFORE_CONDITION: [&str; 4] = ["if", "while", "for", "with"];
+
+/// Whether a line ends at `s[j]`: JavaScript ends one at `\n`, `\r`, U+2028 and U+2029.
+fn line_ends_at(s: &[u8], j: usize) -> bool {
+    matches!(s.get(j..), Some([b'\n' | b'\r', ..] | [0xE2, 0x80, 0xA8 | 0xA9, ..]))
+}
+
+/// JavaScript's tokens with their byte ranges, and apart from them the text of each comment
+/// (inside its `//`, or its `/*` and `*/`): enough of the language to tell code from strings,
+/// comments and regular expressions. The tokens stop where a string, comment or template literal
+/// never ends; a comment that never ends runs to the end of the script.
+fn js_tokens(js: &str) -> (Vec<Token>, Vec<Range<usize>>) {
     let s = js.as_bytes();
-    // Bytes past ASCII are parts of identifiers, so a range never ends inside a character.
-    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || !b.is_ascii();
-    let mut out: Vec<(Range<usize>, Js)> = Vec::new();
+    // Whether `s[j]` is part of a word. Bytes past ASCII are parts of identifiers, except
+    // U+2028 and U+2029, which end a line: a range never ends inside a character.
+    let word = |j: usize| s.get(j).is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || !b.is_ascii()) && !line_ends_at(s, j);
+    let mut out: Vec<Token> = Vec::new();
+    let mut comments = Vec::new();
     let mut i = 0;
     // Where a regular expression that never ended stopped being read: every `/` before it
     // divides, so a line of them is read once, not once for each.
     let mut divides_until = 0;
+    // For each `(` still open, whether it opened the condition of `if`, `while`, `for` or
+    // `with`; and whether the last token is the `)` that closed one.
+    let mut conditions: Vec<bool> = Vec::new();
+    let mut after_condition = false;
     'scan: while let Some(&c) = s.get(i) {
         let start = i;
         let token = match c {
@@ -489,16 +523,27 @@ fn js_tokens(js: &str) -> Vec<(Range<usize>, Js)> {
                 i += 1;
                 continue;
             }
+            // U+2028 or U+2029 between tokens ends a line, and is skipped whole: read a byte at a
+            // time, the rest of it would be read from inside the character.
+            0xE2 if line_ends_at(s, i) => {
+                i += 3;
+                continue;
+            }
             b'/' if s.get(i + 1) == Some(&b'/') => {
-                i = s.iter().skip(i).position(|b| *b == b'\n').map_or(s.len(), |n| i + n);
+                i = (i + 2..s.len()).find(|&j| line_ends_at(s, j)).unwrap_or(s.len());
+                comments.push(start + 2..i);
                 continue;
             }
             b'/' if s.get(i + 1) == Some(&b'*') => match js.get(i + 2..).and_then(|rest| rest.find("*/")) {
                 Some(n) => {
+                    comments.push(i + 2..i + 2 + n);
                     i += n + 4;
                     continue;
                 }
-                None => break 'scan,
+                None => {
+                    comments.push(i + 2..s.len());
+                    break 'scan;
+                }
             },
             b'"' | b'\'' => {
                 let mut p = Parser { s, i, depth: 0 };
@@ -519,13 +564,14 @@ fn js_tokens(js: &str) -> Vec<(Range<usize>, Js)> {
                 i = j + 1;
                 Js::Other
             }
-            b'/' if i >= divides_until && regex_may_follow(js, &out) => {
+            b'/' if i >= divides_until && regex_may_follow(js, &out, after_condition) => {
                 // A regular expression ends at a `/` outside a class; a line break first means it
                 // was a division after all.
                 let (mut j, mut class) = (i + 1, false);
                 let end = loop {
                     match s.get(j) {
-                        None | Some(b'\n') => break None,
+                        None => break None,
+                        Some(_) if line_ends_at(s, j) => break None,
                         Some(b'\\') => j += 2,
                         Some(b'/') if !class => break Some(j),
                         Some(b) => {
@@ -541,7 +587,7 @@ fn js_tokens(js: &str) -> Vec<(Range<usize>, Js)> {
                 match end {
                     Some(e) => {
                         i = e + 1;
-                        while s.get(i).is_some_and(|b| word(*b)) {
+                        while word(i) {
                             i += 1;
                         }
                         Js::Other
@@ -554,13 +600,13 @@ fn js_tokens(js: &str) -> Vec<(Range<usize>, Js)> {
                 }
             }
             _ if c.is_ascii_digit() => {
-                while s.get(i).is_some_and(|b| word(*b) || *b == b'.') {
+                while word(i) || s.get(i) == Some(&b'.') {
                     i += 1;
                 }
                 Js::Other
             }
-            _ if word(c) => {
-                while s.get(i).is_some_and(|b| word(*b)) {
+            _ if word(i) => {
+                while word(i) {
                     i += 1;
                 }
                 Js::Ident
@@ -570,20 +616,50 @@ fn js_tokens(js: &str) -> Vec<(Range<usize>, Js)> {
                 Js::Punct(char::from(c))
             }
         };
+        after_condition = match token {
+            Js::Punct('(') => {
+                conditions.push(opens_condition(js, &out));
+                false
+            }
+            Js::Punct(')') => conditions.pop().unwrap_or(false),
+            _ => false,
+        };
         out.push((start..i, token));
     }
-    out
+    (out, comments)
 }
 
 /// Whether a `/` after `tokens` starts a regular expression: after an operator, an opening
-/// bracket or a keyword such as `return`, not after a value.
-fn regex_may_follow(js: &str, tokens: &[(Range<usize>, Js)]) -> bool {
+/// bracket, a keyword such as `return` or the condition of `if`, `while`, `for` or `with`, not
+/// after a value. `after_condition` says the last token is the `)` that ends such a condition.
+fn regex_may_follow(js: &str, tokens: &[Token], after_condition: bool) -> bool {
     match tokens.last() {
         None => true,
         Some((range, Js::Ident)) => js.get(range.clone()).is_some_and(|w| BEFORE_REGEX.contains(&w)),
-        Some((_, Js::Punct(c))) => !matches!(c, ')' | ']' | '}'),
+        Some((_, Js::Punct(')'))) => after_condition,
+        Some((_, Js::Punct(c))) => !matches!(c, ']' | '}'),
         Some((_, Js::Str(_) | Js::Other)) => false,
     }
+}
+
+/// Whether a `(` after `tokens` opens the condition of `if`, `while`, `for` or `with`, and not
+/// the arguments of a method that has one of those names (`o.if(x)`).
+fn opens_condition(js: &str, tokens: &[Token]) -> bool {
+    let mut back = tokens.iter().rev();
+    let Some((range, Js::Ident)) = back.next() else { return false };
+    js.get(range.clone()).is_some_and(|w| BEFORE_CONDITION.contains(&w)) && !matches!(back.next(), Some((_, Js::Punct('.'))))
+}
+
+/// Where a Calculate script keeps its simplified field notation: between `BVCALC` and the
+/// `EVCALC` after it, in the first of `comments` that holds both, as Acrobat writes it
+/// (`/** BVCALC a + b EVCALC **/`). A string or code that spells the markers is not the notation.
+fn notation_range(js: &str, comments: &[Range<usize>]) -> Option<Range<usize>> {
+    comments.iter().find_map(|comment| {
+        let text = js.get(comment.clone())?;
+        let a = text.find("BVCALC")? + 6;
+        let b = a + text.get(a..)?.find("EVCALC")?;
+        Some(comment.start + a..comment.start + b)
+    })
 }
 
 /// A place where a Calculate script names a field.
@@ -623,22 +699,22 @@ impl Site {
     }
 }
 
-/// Where a Calculate script names fields, in order: the simplified field notation between
-/// `BVCALC` and `EVCALC` (where [`parse_calculate`] reads it), the field list of
+/// Where a Calculate script names fields, in order: the simplified field notation in its comment
+/// (see [`notation_range`]; [`parse_calculate`] reads it there too), the field list of
 /// `AFSimple_Calculate`, and every `getField` whose whole argument is one string literal.
 /// A name built at run time (`getField("row" + i)`) is not a site.
 fn calculation_sites(js: &str) -> Vec<(Range<usize>, Site)> {
     let mut sites = Vec::new();
-    if let (Some(a), Some(b)) = (js.find("BVCALC"), js.find("EVCALC"))
-        && let Some(expr) = js.get(a + 6..b)
+    let (tokens, comments) = js_tokens(js);
+    if let Some(at) = notation_range(js, &comments)
+        && let Some(expr) = js.get(at.clone())
     {
         for (range, token) in notation_tokens(expr) {
             if let Notation::Name(name) = token {
-                sites.push((a + 6 + range.start..a + 6 + range.end, Site::Notation(name)));
+                sites.push((at.start + range.start..at.start + range.end, Site::Notation(name)));
             }
         }
     }
-    let tokens = js_tokens(js);
     let ident = |k: usize, word: &str| tokens.get(k).is_some_and(|(range, t)| *t == Js::Ident && js.get(range.clone()) == Some(word));
     let punct = |k: usize, c: char| tokens.get(k).is_some_and(|(_, t)| *t == Js::Punct(c));
     let string = |k: usize| match tokens.get(k) {
@@ -768,7 +844,10 @@ fn group(int: &str, sep: char) -> String {
 fn number_text(v: f64, decimals: u8, sep: u8) -> String {
     // Round half away from zero, as JavaScript's toFixed does for these values.
     let p = 10f64.powi(i32::from(decimals));
-    let s = format!("{:.*}", decimals as usize, (v.abs() * p).round() / p);
+    let scaled = v.abs() * p;
+    // Past 2^53 every value is already whole, and scaling could overflow to infinity.
+    let r = if scaled.is_finite() { scaled.round() / p } else { v.abs() };
+    let s = format!("{:.*}", decimals as usize, r);
     let (int, frac) = s.split_once('.').map_or((s.as_str(), ""), |(a, b)| (a, b));
     let (g, d) = match sep {
         1 => (None, '.'),
@@ -912,7 +991,8 @@ pub fn parse_date(text: &str, fmt: &str) -> Option<DateTime> {
     // A bare trailing "p" ("5:30p") only counts when it follows a digit, not a word like "Sep".
     let bare_p = lower.strip_suffix('p').is_some_and(|rest| rest.trim_end().ends_with(|c: char| c.is_ascii_digit()));
     let pm = lower.contains("pm") || bare_p;
-    let am = lower.contains("am");
+    let bare_a = lower.strip_suffix('a').is_some_and(|rest| rest.trim_end().ends_with(|c: char| c.is_ascii_digit()));
+    let am = lower.contains("am") || bare_a;
     // Tokens: runs of digits (kept as text, so a run can be split between fields typed without
     // separators) and month names.
     let mut nums: VecDeque<String> = VecDeque::new();
@@ -1415,6 +1495,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn javascript_escapes_are_decoded() {
+        assert_eq!(
+            parse_format("AFNumber_Format(2, 0, 0, 0, \"\\x24\", true);"),
+            Some(Format::Number { decimals: 2, sep: 0, neg: 0, currency: "$".into(), prepend: true })
+        );
+        assert_eq!(parse_format("AFDate_FormatEx(\"\\b\\f\\v\\0\\q\");"), Some(Format::Date("\u{8}\u{c}\u{b}\0q".into())));
+    }
+
+    #[test]
     fn scripts_are_recognised_and_written_back() {
         assert_eq!(
             parse_format("AFNumber_Format(2, 0, 0, 0, \"$\", true);"),
@@ -1498,6 +1587,67 @@ mod tests {
         for js in ["getField(\"a", "/* getField(\"a\")", "`getField(\"a\")", "x = /[/", "getField('a\\u12"] {
             assert_eq!(renamed(js), None, "{js}");
         }
+    }
+
+    /// The notation is read only from a comment, where Acrobat writes it: a string or code that
+    /// spells the markers is left alone, by the Calculate tab and by a rename.
+    #[test]
+    fn notation_is_read_only_from_a_comment() {
+        let string = "var s = \"BVCALC a EVCALC\"; event.value = getField(\"b\").value;";
+        assert_eq!(parse_calculate(string), None);
+        assert_eq!(rename_in_calculation(string, "a", "qty"), None);
+        // A comment after such a string holds the notation.
+        let both = "var s = 'BVCALC x EVCALC'; /** BVCALC a + 1 EVCALC **/ event.value = 1;";
+        assert_eq!(parse_calculate(both), Some(Calculate::Notation("a + 1".into())));
+        assert_eq!(rename_in_calculation(both, "x", "y"), None);
+        assert_eq!(rename_in_calculation(both, "a", "qty"), Some(both.replace("a + 1", "qty + 1")));
+        // A line comment is a comment too, and an unfinished one still holds it.
+        assert_eq!(parse_calculate("// BVCALC a EVCALC\nevent.value = 1;"), Some(Calculate::Notation("a".into())));
+        assert_eq!(parse_calculate("/** BVCALC a EVCALC"), Some(Calculate::Notation("a".into())));
+    }
+
+    /// A line comment ends at any of JavaScript's line terminators, not only `\n`, so with `\r` line
+    /// endings the code after one is still code; and a `/` read as starting a regular expression
+    /// divides after all when the line ends first.
+    #[test]
+    fn a_line_comment_ends_at_any_line_terminator() {
+        for end in ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"] {
+            let string = format!("// header{end}var s = \"BVCALC a EVCALC\"; event.value = getField(\"b\").value;");
+            assert_eq!(parse_calculate(&string), None, "{end:?}");
+            assert_eq!(rename_in_calculation(&string, "a", "qty"), None, "{end:?}");
+            let script = format!("// note{end}getField(\"a\").value;");
+            assert_eq!(rename_in_calculation(&script, "a", "qty"), Some(script.replace("\"a\"", "\"qty\"")), "{end:?}");
+            let divides = format!("var n = i++ / 2;{end}event.value = getField(\"a\").value / 4;");
+            assert_eq!(rename_in_calculation(&divides, "a", "qty"), Some(divides.replace("\"a\"", "\"qty\"")), "{end:?}");
+        }
+    }
+
+    /// U+2028 and U+2029 end a word, a number or a regular expression's flags, though as bytes
+    /// past ASCII they could be part of one, so a `getField` right after one is still a call.
+    #[test]
+    fn a_token_ends_at_a_line_separator() {
+        for end in ["\u{2028}", "\u{2029}"] {
+            let scripts = ["x", "1", "/r/g"].map(|token| format!("var t = {token}{end}getField(\"a\").value;"));
+            let renamed = scripts.clone().map(|js| rename_in_calculation(&js, "a", "qty"));
+            assert_eq!(renamed, scripts.map(|js| Some(js.replace("\"a\"", "\"qty\""))), "{end:?}");
+        }
+    }
+
+    /// A `/` after the condition of `if`, `while`, `for` or `with` starts a regular expression,
+    /// as after an operator; after a call's parentheses it still divides.
+    #[test]
+    fn a_regex_after_a_condition_is_not_read_as_code() {
+        let renamed = |js: &str| rename_in_calculation(js, "a", "qty");
+        assert_eq!(renamed("if (flag) /getField(\"a\")/.test(x); event.value = 1;"), None);
+        // A quote inside it doesn't start a string that hides the rest of the script.
+        let quote = "while (i--) /\"/.test(s); event.value = getField(\"a\").value;";
+        assert_eq!(renamed(quote), Some(quote.replace("\"a\"", "\"qty\"")));
+        // The same after the `while` that ends a `do` loop.
+        let after_do = "do i++; while (i < n) /\"/.test(s); event.value = getField(\"a\").value;";
+        assert_eq!(renamed(after_do), Some(after_do.replace("\"a\"", "\"qty\"")));
+        // After a call, or a method that happens to be called `if`, the `/` divides.
+        let divides = "event.value = Math.abs(getField(\"b\").value) / 2 + getField(\"a\").value / 3 + o.if(x) / 4 + getField(\"a\").value / 5;";
+        assert_eq!(renamed(divides), Some(divides.replace("\"a\"", "\"qty\"")));
     }
 
     /// Scripts are read in one pass: a line of unfinished regular expressions, or calls nested in
@@ -1912,5 +2062,13 @@ mod undelimited_tests {
         assert_eq!(parse_date("1430", "HHMM").map(|d| (d.hh, d.mm)), Some((14, 30)));
         assert_eq!(parse_date("99999999999999999999", "yyyymmdd"), None);
         assert_eq!(parse_date("2026 99999999999", "yyyy"), None, "an unreadable number is left over, not ignored");
+    }
+
+    #[test]
+    fn huge_finite_numbers_do_not_print_inf() {
+        let n = format_value(&Format::Number { decimals: 2, sep: 1, neg: 0, currency: String::new(), prepend: true }, "1e307");
+        assert!(n.len() > 300 && n.ends_with(".00") && !n.contains("inf"), "got {n}");
+        let p = format_value(&Format::Percent { decimals: 2, sep: 1 }, "1e306");
+        assert!(!p.contains("inf"), "got {p}");
     }
 }

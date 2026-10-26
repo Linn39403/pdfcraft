@@ -117,6 +117,8 @@
 	Next view	Επόμενη προβολή
 	Page display	Εμφάνιση σελίδων
 	Continuous scrolling	Συνεχής κύλιση
+	Show gaps between pages	Εμφάνιση κενών ανάμεσα στις σελίδες
+	Hide gaps to join page edges. Margins inside the PDF remain unchanged.	Αποκρύψτε τα κενά για να ενώσετε τις άκρες των σελίδων. Τα περιθώρια μέσα στο PDF παραμένουν αμετάβλητα.
 	Two-page view	Προβολή δύο σελίδων
 	Single page	Μονή σελίδα
 	Show cover page in two-page view	Εμφάνιση εξωφύλλου στην προβολή δύο σελίδων
@@ -363,6 +365,8 @@
 	Distribute	Κατανομή
 	Show layer	Εμφάνιση επιπέδου
 	Hide layer	Απόκρυψη επιπέδου
+	Layer options	Επιλογές επιπέδων
+	Reset to Initial Visibility	Επαναφορά αρχικής ορατότητας
 	Collate	Συρραφή αντιγράφων
 	Fit to page	Προσαρμογή στη σελίδα
 	Reverse pages	Αντιστροφή σειράς σελίδων
@@ -424,6 +428,7 @@
 	Insert Page Number	Εισαγωγή αριθμού σελίδας
 	Insert Date	Εισαγωγή ημερομηνίας
 	Start page number	Αρχικός αριθμός σελίδας
+	Shrink the page content to make room for the header and footer	Σμίκρυνση του περιεχομένου της σελίδας ώστε να χωρούν η κεφαλίδα και το υποσέλιδο
 	Source	Πηγή
 	Appear behind page	Εμφάνιση πίσω από τη σελίδα
 	Appear on top of page	Εμφάνιση πάνω από τη σελίδα
@@ -764,6 +769,7 @@
 	Two-sided:	Εκτύπωση διπλής όψης:
 	Flip on long edge	Αναστροφή στη μεγάλη πλευρά
 	Flip on short edge	Αναστροφή στη μικρή πλευρά
+	Printer default	Προεπιλογή εκτυπωτή
 	Paper:	Χαρτί:
 	Pages to Print	Σελίδες προς εκτύπωση
 	More options:	Περισσότερες επιλογές:
@@ -1411,6 +1417,10 @@
 	Perimeter	Περίμετρος
 	Area	Εμβαδόν
 	Drawing scale	Κλίμακα σχεδίου
+	Scale	Κλίμακα
+	Common scales	Συνηθισμένες κλίμακες
+	Enter a scale such as 1:50.	Εισαγάγετε μια κλίμακα, όπως 1:50.
+	Applying a scale switches units to m / mm.	Η εφαρμογή κλίμακας αλλάζει τις μονάδες σε m / mm.
 	Snapping	Προσκόλληση
 	Export measurements	Εξαγωγή μετρήσεων
 	Open a PDF to measure it.	Ανοίξτε ένα PDF για να πραγματοποιήσετε μετρήσεις.
@@ -1461,6 +1471,7 @@
 	Couldn't import the signature image: {e}	Δεν ήταν δυνατή η εισαγωγή της εικόνας υπογραφής: {e}
 	Go to page…	Μετάβαση στη σελίδα…
 	Reopen the files that were open when PdfCraft last closed	Εκ νέου άνοιγμα των αρχείων που ήταν ανοιχτά κατά τον τελευταίο τερματισμό του PdfCraft
+	Restore the last view (page, zoom and page display) when a document is opened again	Επαναφορά της τελευταίας προβολής (σελίδα, ζουμ και εμφάνιση σελίδων) όταν ένα έγγραφο ανοίγει ξανά
 	The PDF text fonts can't draw “{c}” ({code}). Choose supported text.	Οι γραμματοσειρές κειμένου PDF δεν μπορούν να εμφανίσουν τον χαρακτήρα «{c}» ({code}). Επιλέξτε κείμενο που υποστηρίζεται.
 	Open arrow	Ανοιχτή αιχμή βέλους
 	Closed arrow	Κλειστή αιχμή βέλους
@@ -1917,6 +1928,7 @@
 	Discard private data of other applications	Αφαίρεση ιδιωτικών δεδομένων άλλων εφαρμογών
 	Discard hidden text	Αφαίρεση κρυφού κειμένου
 	Use Flate to encode streams that are not encoded	Χρήση συμπίεσης Flate για ροές που δεν είναι συμπιεσμένες
+	In streams that use LZW encoding, use Flate instead	Χρήση Flate αντί για LZW στις ροές με κωδικοποίηση LZW
 	Remove invalid links and bookmarks	Αφαίρεση μη έγκυρων συνδέσμων και σελιδοδεικτών
 	Remove unreferenced named destinations	Αφαίρεση ονομασμένων προορισμών χωρίς αναφορές
 	Compress document structure (object streams)	Συμπίεση δομής εγγράφου (ροές αντικειμένων)
@@ -2155,6 +2167,15 @@
 	View more	Περισσότερα
 	Available	Διαθέσιμο
 	Search tools and commands…	Αναζήτηση εργαλείων και εντολών…
+
+# Accessible names for inputs that have no visible label.
+	Added text	Προστιθέμενο κείμενο
+	Link URL	Διεύθυνση URL συνδέσμου
+	Search tools and commands	Αναζήτηση εργαλείων και εντολών
+	Text editing line	Γραμμή επεξεργασίας κειμένου
+	Text to place	Κείμενο προς τοποθέτηση
+	Tooltip	Συμβουλή εργαλείου
+	Words or phrases to redact	Λέξεις ή φράσεις για απόκρυψη
 	No matching tools	Δεν βρέθηκαν εργαλεία
 	Tool	Εργαλείο
 	Command	Εντολή
@@ -2286,6 +2307,7 @@ comment menu	Edit	Επεξεργασία
 	Looking for printers…	Αναζήτηση εκτυπωτών…
 	Sending sheet {s} of {n} to {printer}…	Αποστολή φύλλου {s} από {n} στον {printer}…
 	No printers were found. Check that the printer is installed and the print spooler is running, then open Print again.	Δεν βρέθηκαν εκτυπωτές. Ελέγξτε ότι ο εκτυπωτής είναι εγκατεστημένος και ότι η ουρά εκτύπωσης εκτελείται και, στη συνέχεια, ανοίξτε ξανά την Εκτύπωση.
+	Reading the printer's settings…	Ανάγνωση των ρυθμίσεων του εκτυπωτή…
 	Sending to {printer}…	Αποστολή στον {printer}…
 	Enter permissions password…	Εισαγωγή κωδικού δικαιωμάτων…
 	Permissions password	Κωδικός δικαιωμάτων
@@ -2294,6 +2316,7 @@ comment menu	Edit	Επεξεργασία
 	Couldn't unlock {name}: {e}	Δεν ήταν δυνατό το ξεκλείδωμα του {name}: {e}
 	This document has no restrictions to lift	Αυτό το έγγραφο δεν έχει περιορισμούς προς άρση
 	The document's security settings don't allow copying text and images	Οι ρυθμίσεις ασφαλείας του εγγράφου δεν επιτρέπουν την αντιγραφή κειμένου και εικόνων
+	The document's security settings don't allow printing	Οι ρυθμίσεις ασφαλείας του εγγράφου δεν επιτρέπουν την εκτύπωση
 	Add the files to combine	Προσθέστε τα αρχεία προς συνδυασμό
 	Leave out files that can't be read?	Να παραλειφθούν τα αρχεία που δεν διαβάζονται;
 	These files can't be read, so they won't be in the combined PDF:	Αυτά τα αρχεία δεν διαβάζονται, οπότε δεν θα συμπεριληφθούν στο συνδυασμένο PDF:
@@ -2320,6 +2343,9 @@ comment menu	Edit	Επεξεργασία
 	Printer paper and scaling may differ. Check driver settings.	Το χαρτί και η κλίμακα του εκτυπωτή μπορεί να διαφέρουν. Ελέγξτε τις ρυθμίσεις του προγράμματος οδήγησης.
 	Drawing scale changes. Use Actual size for full-scale plans.	Η κλίμακα του σχεδίου αλλάζει. Για σχέδια σε πλήρη κλίμακα χρησιμοποιήστε το Πραγματικό μέγεθος.
 	Reload documents when their files change on disk	Επαναφόρτωση εγγράφων όταν αλλάζουν τα αρχεία τους στον δίσκο
+	Don't show again	Να μην εμφανιστεί ξανά
+	Show a notice when a document is secured	Εμφάνιση ειδοποίησης όταν ένα έγγραφο προστατεύεται
+	Always use my default zoom and page layout	Να χρησιμοποιείται πάντα η προεπιλεγμένη μεγέθυνση και διάταξη σελίδας μου
 	This file changed on disk. Reload shows the new version and drops your unsaved changes; Save replaces it with this version.	Αυτό το αρχείο άλλαξε στον δίσκο. Η επαναφόρτωση δείχνει τη νέα έκδοση και απορρίπτει τις μη αποθηκευμένες αλλαγές σας· η αποθήκευση την αντικαθιστά με αυτή την έκδοση.
 	Reload	Επαναφόρτωση
 	Couldn't reload {name}: {e}	Δεν ήταν δυνατή η επαναφόρτωση του {name}: {e}
@@ -2478,6 +2504,19 @@ animation effects	Off	Ανενεργά
 	Make properties default	Ορισμός ιδιοτήτων ως προεπιλογή
 	Pages selected	Επιλεγμένες σελίδες
 	Page properties	Ιδιότητες σελίδας
+	Create & Edit	Δημιουργία και επεξεργασία
+	Review & Compare	Αναθεώρηση και σύγκριση
+	Forms & Signatures	Φόρμες και υπογραφές
+	Protect & Standardize	Προστασία και τυποποίηση
+	Customize & Automate	Προσαρμογή και αυτοματοποίηση
+	No tools match your search.	Κανένα εργαλείο δεν ταιριάζει με την αναζήτησή σας.
+	Expand all tools	Ανάπτυξη όλων των εργαλείων
+	Collapse all tools	Σύμπτυξη όλων των εργαλείων
+	Attach a file…	Επισύναψη αρχείου…
+	Delete attachment	Διαγραφή συνημμένου
+	Attaching files is not available on the web yet	Η επισύναψη αρχείων δεν είναι ακόμη διαθέσιμη στον ιστό
+	Attach {name}	Επισύναψη {name}
+	Delete attachment {key}	Διαγραφή συνημμένου {key}
 	Font	Γραμματοσειρά
 	Bulleted list	Λίστα με κουκκίδες
 	Numbered list	Αριθμημένη λίστα
@@ -2487,3 +2526,40 @@ animation effects	Off	Ανενεργά
 	Paragraph spacing	Απόσταση παραγράφων
 	Less	Λιγότερα
 	Other options	Άλλες επιλογές
+	Thumbnail size	Μέγεθος μικρογραφιών
+	Smaller thumbnails	Μικρότερες μικρογραφίες
+	Larger thumbnails	Μεγαλύτερες μικρογραφίες
+# Lines, connected lines and polygons reshaped by their ends and corners (M5).
+	Reshape comment	Αλλαγή σχήματος σχολίου
+
+# Prepare a form ▸ Text field table
+	Add text field table	Προσθήκη πίνακα πεδίων κειμένου
+	Text field table	Πίνακας πεδίων κειμένου
+	Text Field Table	Πίνακας πεδίων κειμένου
+	Columns	Στήλες
+	Row spacing	Απόσταση γραμμών
+	Column spacing	Απόσταση στηλών
+	First row number	Αριθμός πρώτης γραμμής
+	Column widths	Πλάτη στηλών
+	Distribute evenly	Ομοιόμορφη κατανομή
+	Field names	Ονόματα πεδίων
+	N or {row} is the row number, {col} the column number, {seq} the cell number. With none of them, the row number goes last.	Το N ή το {row} είναι ο αριθμός γραμμής, το {col} ο αριθμός στήλης και το {seq} ο αριθμός κελιού. Χωρίς κανένα από αυτά, ο αριθμός γραμμής μπαίνει στο τέλος.
+	Column {n}	Στήλη {n}
+	Add fields	Προσθήκη πεδίων
+	the rows are too short: make the area taller, or use fewer rows or less row spacing	οι γραμμές είναι πολύ χαμηλές: κάντε την περιοχή ψηλότερη ή χρησιμοποιήστε λιγότερες γραμμές ή μικρότερη απόσταση γραμμών
+	a column is too narrow: make the area wider, give the column more of it, or use fewer columns or less column spacing	μια στήλη είναι πολύ στενή: κάντε την περιοχή φαρδύτερη, δώστε στη στήλη περισσότερο πλάτος ή χρησιμοποιήστε λιγότερες στήλες ή μικρότερη απόσταση στηλών
+	field names can't contain a period: {name}	τα ονόματα πεδίων δεν μπορούν να περιέχουν τελεία: {name}
+	two cells would both be named {name}	δύο κελιά θα είχαν το ίδιο όνομα {name}
+	a field named {name} already exists	υπάρχει ήδη πεδίο με όνομα {name}
+
+# Date picker: Today button (#4274) (AI-assisted, not separately native-reviewed)
+	Today	Σήμερα
+@plural	{n} reply|{n} replies	{n} απάντηση|{n} απαντήσεις
+
+# Pages panel: the Page tools menu (#4415) (AI-assisted, not separately native-reviewed)
+	Page tools	Εργαλεία σελίδων
+	Insert pages from a file after the selection…	Εισαγωγή σελίδων από αρχείο μετά την επιλογή…
+	Rotate the selected pages counterclockwise	Περιστροφή των επιλεγμένων σελίδων αριστερόστροφα
+	Rotate the selected pages clockwise	Περιστροφή των επιλεγμένων σελίδων δεξιόστροφα
+	Extract the selected pages…	Εξαγωγή των επιλεγμένων σελίδων…
+	Delete the selected pages	Διαγραφή των επιλεγμένων σελίδων
