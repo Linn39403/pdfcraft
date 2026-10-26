@@ -610,13 +610,13 @@ fn a_paper_picked_from_the_menu_while_in_label_is_kept() {
 }
 
 /// Properties… reads the printer's driver options off the GUI thread: the dialog keeps drawing
-/// while CUPS answers, and a read that dies leaves the panel with nothing rather than waiting
+/// while CUPS answers, and a read that dies reports a failure rather than an empty settings list
 /// (#1818). The click's request is made directly, so the test runs where Properties… opens the
 /// driver's own window instead (Windows).
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn printer_options_are_read_off_the_gui_thread_and_a_dead_read_offers_nothing() {
-    use pdfcraft_engine::print::spool::PrinterOption;
+fn printer_options_are_read_off_the_gui_thread_and_a_dead_read_reports_failure() {
+    use pdfcraft_engine::print::spool::{PrinterOption, PrinterOptions};
     use std::sync::{Arc, Mutex};
     let mut h = harness();
     // The source waits until the test lets it answer, so the dialog is seen while it reads.
@@ -626,18 +626,22 @@ fn printer_options_are_read_off_the_gui_thread_and_a_dead_read_offers_nothing() 
     h.state_mut().options_source = Some(Arc::new(move |printer: &str| {
         assert_ne!(printer, "Dead", "the read died");
         let _open = wait.lock();
-        vec![PrinterOption {
-            key: "InputSlot".into(),
-            label: "Paper tray".into(),
-            group: String::new(),
-            choices: vec![("Auto".into(), "Automatic".into()), ("Tray2".into(), "Tray 2".into())],
-            default: "Auto".into(),
-        }]
+        PrinterOptions {
+            options: vec![PrinterOption {
+                key: "InputSlot".into(),
+                label: "Paper tray".into(),
+                group: String::new(),
+                choices: vec![("Auto".into(), "Automatic".into()), ("Tray2".into(), "Tray 2".into())],
+                default: "Auto".into(),
+            }],
+            diagnostic: Some("Could not read queue defaults".into()),
+        }
     }));
     assert!(h.state_mut().execute("print.dialog"));
     h.run_steps(2);
     let ask = |h: &mut Harness<'static, PdfCraftApp>, printer: &str| {
         let d = &mut h.state_mut().print_draft;
+        d.printer = Some(printer.into());
         d.driver_options = None;
         d.driver_options_loading = Some(printer.into());
         d.read_options_for = Some(printer.into());
@@ -662,10 +666,33 @@ fn printer_options_are_read_off_the_gui_thread_and_a_dead_read_offers_nothing() 
     assert_eq!(options.len(), 1);
     assert_eq!(options[0].key, "InputSlot");
     h.get_by_label("Paper tray");
+    h.get_by_label("Could not read queue defaults");
 
     ask(&mut h, "Dead");
     settle(&mut h);
-    assert_eq!(h.state().print_draft.driver_options, Some(("Dead".into(), Vec::new())), "a dead read offers nothing, and the panel says so");
+    assert_eq!(h.state().print_draft.driver_options, Some(("Dead".into(), Vec::new())), "a dead read has no usable options");
+    h.get_by_label("Could not read the printer settings: the background read stopped unexpectedly. Close and reopen Properties to retry.");
+    assert!(h.query_by_label("This printer offers no settings of its own.").is_none());
+    if let Ok(out) = std::env::var("PDFCRAFT_SHOT") {
+        let _gpu = crate::gpu();
+        h.render().unwrap().save(out).unwrap();
+    }
+
+    // A successful empty reply clears the earlier failure and alone uses the empty message.
+    h.state_mut().options_source = Some(Arc::new(|_| PrinterOptions::default()));
+    #[cfg(unix)]
+    {
+        h.state_mut().print_draft.printer = Some("Dead".into());
+        h.get_by_role_and_label(Role::Button, "Done").click();
+        h.run_steps(2);
+        h.get_by_role_and_label(Role::Button, "Properties…").click();
+        h.run_steps(2);
+        settle(&mut h);
+        assert!(h.state().print_draft.driver_options_diagnostic.is_none(), "reopening retries a failed read");
+    }
+    ask(&mut h, "Empty");
+    settle(&mut h);
+    assert!(h.state().print_draft.driver_options_diagnostic.is_none());
     h.get_by_label("This printer offers no settings of its own.");
 }
 
@@ -711,6 +738,7 @@ fn a_dead_options_read_wakes_an_idle_dialog() {
     assert!(h.ctx.has_requested_repaint(), "the dead read asked for a frame");
     h.run();
     assert_eq!(h.state().print_draft.driver_options, Some(("Office".into(), Vec::new())));
+    assert!(h.state().print_draft.driver_options_diagnostic.as_deref().is_some_and(|m| m.contains("stopped unexpectedly")));
 }
 
 /// A document whose security forbids printing (#2669) says so before the dialog opens, and the

@@ -525,6 +525,9 @@ mod cups_options {
         let args: Vec<String> = std::env::args().skip_while(|a| a != "--").skip(1).collect();
         std::fs::write(std::path::Path::new(&record).join("args"), args.join("\n")).unwrap();
         let answer = std::env::var(ANSWER).unwrap();
+        if answer == "FAIL" {
+            std::process::exit(7);
+        }
         // A queue that never answers (CUPS stopped responding).
         if answer == "HANG" {
             std::thread::sleep(std::time::Duration::from_secs(60));
@@ -548,6 +551,58 @@ mod cups_options {
         assert!(started.elapsed() < std::time::Duration::from_secs(20), "given up at the deadline, not when the command does");
         assert_eq!(options.len(), 1, "the PPD is still read");
         assert_eq!(options[0].default, "Auto", "the PPD default stands when the queue does not answer");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Missing or unreadable PPDs must not look like a successful empty driver.
+    #[test]
+    fn option_read_failures_are_distinct_from_empty_success() {
+        let dir = folder();
+        let missing = spool::load_printer_options_via_within("Office", &dir, command(&dir, ""), LIMIT, "en");
+        assert!(missing.options.is_empty());
+        assert!(missing.diagnostic.as_deref().is_some_and(|d| d.contains("Office.ppd")), "{missing:?}");
+        // A regular file used as the parent produces ENOTDIR even when tests run as root.
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(&blocker, "").unwrap();
+        let unreadable = spool::load_printer_options_via_within("Office", &blocker, command(&dir, ""), LIMIT, "en");
+        assert!(unreadable.diagnostic.as_deref().is_some_and(|d| d.contains("not-a-directory")), "{unreadable:?}");
+        std::fs::write(dir.join("Office.ppd"), "*PPD-Adobe: \"4.3\"\n").unwrap();
+        let empty = spool::load_printer_options_via_within("Office", &dir, command(&dir, ""), LIMIT, "en");
+        assert!(empty.options.is_empty());
+        assert_eq!(empty.diagnostic, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An over-limit PPD is a failed read, never a successfully parsed truncated driver.
+    #[test]
+    fn oversized_ppds_report_the_read_limit() {
+        let dir = folder();
+        std::fs::File::create(dir.join("Office.ppd")).unwrap().set_len((16 << 20) + 1).unwrap();
+        let result = spool::load_printer_options_via_within("Office", &dir, command(&dir, ""), LIMIT, "en");
+        assert!(result.options.is_empty());
+        assert!(result.diagnostic.as_deref().is_some_and(|d| d.contains("16 MiB")), "{result:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Helper errors preserve usable options but disclose that queue defaults are unavailable.
+    #[test]
+    fn defaults_failures_preserve_options_and_report_the_cause() {
+        let dir = folder();
+        std::fs::write(
+            dir.join("Office.ppd"),
+            "*OpenUI *InputSlot/Tray: PickOne\n*DefaultInputSlot: Auto\n*InputSlot Auto/Automatic: \"\"\n*CloseUI: *InputSlot\n",
+        )
+        .unwrap();
+        for (helper, limit, expected) in [
+            (std::process::Command::new(dir.join("missing-lpoptions")), LIMIT, "lpoptions"),
+            (command(&dir, "FAIL"), LIMIT, "7"),
+            (command(&dir, "HANG"), std::time::Duration::from_millis(100), "within"),
+        ] {
+            let result = spool::load_printer_options_via_within("Office", &dir, helper, limit, "en");
+            assert_eq!(result.options.len(), 1);
+            assert_eq!(result.options[0].default, "Auto");
+            assert!(result.diagnostic.as_deref().is_some_and(|d| d.contains(expected)), "{result:?}");
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -640,10 +695,9 @@ mod cups_options {
             long_queue_instance.as_str(),
             long_instance.as_str(),
         ] {
-            assert!(
-                spool::printer_options_via_within(destination, &dir, command(&dir, "InputSlot: *Auto"), LIMIT, "en").is_empty(),
-                "{destination:?}"
-            );
+            let result = spool::load_printer_options_via_within(destination, &dir, command(&dir, "InputSlot: *Auto"), LIMIT, "en");
+            assert!(result.options.is_empty(), "{destination:?}");
+            assert!(result.diagnostic.as_deref().is_some_and(|d| d.contains("Invalid printer destination")), "{destination:?}");
             assert!(!dir.join("args").exists(), "{destination:?}: rejected before spawning");
         }
         std::fs::remove_dir_all(dir).unwrap();
