@@ -1733,16 +1733,15 @@ fn text_positioning(
         let first = line.ops.iter().min().copied().ok_or_else(invalid)?;
         let last = line.ops.iter().max().copied().ok_or_else(invalid)?;
         let interval = ops.get(first..=last).ok_or_else(invalid)?;
-        if !interval
-            .iter()
-            .any(|op| op.is("TJ") && op.operands.iter().filter_map(Object::as_array).flatten().any(|v| v.as_f64().is_some_and(|n| n != 0.0)))
-        {
+        if !interval.iter().any(|op| {
+            op.is("TJ")
+                && op.operands.last().and_then(Object::as_array).is_some_and(|values| values.iter().any(|v| v.as_f64().is_some_and(|n| n != 0.0)))
+        }) {
             continue;
         }
         let font = fonts.get(line.font.as_bytes()).and_then(|f| doc.dict(f)).ok_or_else(invalid)?;
         let metrics = Metrics::from_dict(doc, &font);
         let mut state = line.origin.state.clone();
-        let mut stack = Vec::new();
         let size = state.font.as_ref().map(|(_, size)| *size).ok_or_else(invalid)?;
         let matrix = Matrix(line.origin.tm).then(&Matrix(line.origin.ctm));
         let across = matrix.0[0].hypot(matrix.0[1]);
@@ -1754,23 +1753,6 @@ fn text_positioning(
         for (offset, op) in interval.iter().enumerate() {
             let at = first.checked_add(offset).ok_or_else(invalid)?;
             match op.op.as_slice() {
-                b"q" => {
-                    if stack.len() >= 256 {
-                        return Err(invalid());
-                    }
-                    stack.push(state.clone());
-                }
-                b"Q" => {
-                    if let Some(saved) = stack.pop() {
-                        state = saved;
-                    } else {
-                        // The interval can start inside an isolated run. Its enclosing q
-                        // predates this reading, so require explicit spacing before any show.
-                        state.char_spacing = f64::NAN;
-                        state.word_spacing = f64::NAN;
-                        state.scale = f64::NAN;
-                    }
-                }
                 b"Tc" => state.char_spacing = op.num(0).ok_or_else(invalid)?,
                 b"Tw" => state.word_spacing = op.num(0).ok_or_else(invalid)?,
                 b"Tz" => state.scale = op.num(0).ok_or_else(invalid)? / 100.0,
@@ -1784,7 +1766,7 @@ fn text_positioning(
                         return Err(invalid());
                     }
                     let pieces = if op.is("TJ") {
-                        op.operands.first().and_then(Object::as_array).ok_or_else(invalid)?.as_slice()
+                        op.operands.last().and_then(Object::as_array).ok_or_else(invalid)?.as_slice()
                     } else {
                         std::slice::from_ref(op.operands.last().ok_or_else(invalid)?)
                     };
@@ -1843,7 +1825,7 @@ fn text_positioning(
                     }
                 }
                 // These do not move the text matrix. All explicit positioning, graphics
-                // transforms and unknown operators remain outside this bounded path.
+                // transforms/restores and unknown operators remain outside this bounded path.
                 b"TL" | b"Tr" | b"Ts" | b"g" | b"rg" | b"k" | b"cs" | b"sc" | b"scn" | b"BMC" | b"BDC" | b"EMC" | b"MP" | b"DP" => {}
                 _ => return Err(invalid()),
             }

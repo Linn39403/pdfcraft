@@ -505,7 +505,7 @@ fn glyph_positions(doc: &Document) -> Vec<(char, f64, f64)> {
                 }
                 let metrics = pdfcraft_fonts::pdf::Metrics::from_dict(doc, &doc.dict(fonts.get(state.1.as_bytes()).unwrap()).unwrap());
                 let pieces = if op.is("TJ") {
-                    op.operands.first().and_then(Object::as_array).unwrap().clone()
+                    op.operands.last().and_then(Object::as_array).unwrap().clone()
                 } else {
                     vec![op.operands.last().unwrap().clone()]
                 };
@@ -783,6 +783,7 @@ fn mixed_spacing_underlines_restate_inner_text_paint_after_save() {
     .unwrap();
     rewrite_block(&mut doc, 0, 0, Some("B tail"), &BlockStyle { underline: Some(true), ..Default::default() }).unwrap();
     let saved = reopen(&doc);
+    assert_no_graphics_stack_inside_text(&saved);
     let mut state = None;
     let mut stack = Vec::new();
     let mut strokes = 0;
@@ -823,4 +824,63 @@ fn sequential_text_objects_keep_exact_spacing_in_paragraph_only() {
     let before = write_full(&manual, &SaveOptions::default()).unwrap();
     assert!(replace_block(&mut manual, 0, 0, "replacement").is_err());
     assert_eq!(write_full(&manual, &SaveOptions::default()).unwrap(), before);
+}
+
+fn assert_no_graphics_stack_inside_text(doc: &Document) {
+    let mut text = false;
+    for op in pdfcraft_content::parse(&content_bytes(doc)).ops {
+        match op.op.as_slice() {
+            b"BT" => {
+                assert!(!text, "nested text object");
+                text = true;
+            }
+            b"ET" => {
+                assert!(text, "unmatched end text");
+                text = false;
+            }
+            b"q" | b"Q" => assert!(!text, "graphics stack operator inside text object"),
+            _ => {}
+        }
+    }
+    assert!(!text);
+}
+
+#[test]
+fn exact_rows_keep_graphics_isolation_outside_text_objects() {
+    for content in ["BT /F1 24 Tf 72 700 Td (A ) Tj 0.001 Tc 95 Tz (tail) Tj ET", "BT /F1 24 Tf 72 700 Td (A ) Tj 0.001 Tc [(ta) 3 (il)] TJ ET"] {
+        let mut doc = fixture(content);
+        replace_block(&mut doc, 0, 0, "B tail").unwrap();
+        let after = reopen(&doc);
+        assert_no_graphics_stack_inside_text(&after);
+        assert_eq!(text_blocks(&after, 0).unwrap()[0].editor_text, "B tail");
+        replace_block(&mut doc, 0, 0, "A tail").unwrap();
+        assert_no_graphics_stack_inside_text(&reopen(&doc));
+    }
+}
+
+#[test]
+fn surplus_tj_arrays_follow_the_drawn_last_operand() {
+    for paragraph in [false, true] {
+        check_positioned_geometry("BT /F1 24 Tf 72 700 Td (A ) Tj 0.001 Tc [(ta) 3 (il)] [(ta) -3 (il)] TJ ET", "A", "B", paragraph);
+    }
+}
+
+#[test]
+fn incompatible_exact_row_paint_refuses_atomically() {
+    let mut doc = fixture("BT /F1 24 Tf 72 700 Td (A ) Tj 0.001 Tc (tail) Tj 1 Tr ( end) Tj ET");
+    assert_eq!(text_blocks(&doc, 0).unwrap().len(), 1);
+    let saved = write_full(&doc, &SaveOptions::default()).unwrap();
+    assert!(replace_block(&mut doc, 0, 0, "B tail end").is_err());
+    assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), saved);
+}
+
+#[test]
+fn positioned_source_graphics_stack_refuses_without_assuming_text_matrix_semantics() {
+    for paragraph in [false, true] {
+        let mut doc = fixture("BT /F1 24 Tf 72 700 Td (A ) Tj q 0.001 Tc [(ta) 3 (il)] TJ Q ( end) Tj ET");
+        let saved = write_full(&doc, &SaveOptions::default()).unwrap();
+        let result = if paragraph { replace_block(&mut doc, 0, 0, "B tail end") } else { replace_line(&mut doc, 0, 0, "B tail end") };
+        assert!(result.is_err(), "inner q/Q matrix semantics are not supported by exact source mapping");
+        assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), saved);
+    }
 }

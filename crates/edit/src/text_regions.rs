@@ -1022,6 +1022,22 @@ pub(super) fn rewrite_styled_block(
         // line grouping does not fragment again after a paragraph is saved and reopened.
         let mut row_underlines = Vec::new();
         if exact_spacing {
+            // A shared text object preserves the sequential pen. Its graphics stack must
+            // stay outside BT/ET (PDF 1.x); PDF 2.0 q/Q also restore the text matrices.
+            // Share only an identical paint program from the same baseline; otherwise a
+            // gs has no inverse and one segment could silently repaint its neighbour.
+            let source = row.first().and_then(|item| lines.get(item.1)).unwrap_or(first);
+            let paint = source.origin.state.paint_ops(after);
+            if row.iter().any(|item| {
+                let other = lines.get(item.1).unwrap_or(first);
+                other.origin.state.render_mode != source.origin.state.render_mode || other.origin.state.paint_ops(after) != paint
+            }) {
+                return Err(EditError::Invalid(
+                    "mixed text spacing with incompatible row paint is not supported; the document was not changed".into(),
+                ));
+            }
+            block_ops.push(Op::new("q", vec![]));
+            block_ops.extend(paint);
             block_ops.push(Op::new("BT", vec![]));
         }
         let mut pos = 0;
@@ -1058,8 +1074,10 @@ pub(super) fn rewrite_styled_block(
             // Each run in its own graphics state, restating what its source set inside its text
             // object (`gs`, stroke, line width, `Tr`; #3508/#3509) from the state the rewrite is
             // drawn in: a `gs` has no inverse, so one run's ExtGState would stay for the next.
-            block_ops.push(Op::new("q", vec![]));
-            block_ops.extend(state.paint_ops(after));
+            if !exact_spacing {
+                block_ops.push(Op::new("q", vec![]));
+                block_ops.extend(state.paint_ops(after));
+            }
             if let Some((_, shaped, _)) = shaped_runs.get(&(row_index, pos)) {
                 let resource = glyph_resources.get(&(row_index, pos)).ok_or_else(|| EditError::Invalid("shaped font is missing".into()))?;
                 let mut properties = Dict::new();
@@ -1162,12 +1180,15 @@ pub(super) fn rewrite_styled_block(
                     out.push(Op::new("Q", vec![]));
                 }
             }
-            block_ops.push(Op::new("Q", vec![]));
+            if !exact_spacing {
+                block_ops.push(Op::new("Q", vec![]));
+            }
             x += segment_width;
             pos = end;
         }
         if exact_spacing {
             block_ops.push(Op::new("ET", vec![]));
+            block_ops.push(Op::new("Q", vec![]));
             block_ops.extend(row_underlines);
         }
         baseline -= if style.line_spacing.is_none() && style.size.is_none() {
