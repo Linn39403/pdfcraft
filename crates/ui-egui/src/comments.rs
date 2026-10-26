@@ -2143,6 +2143,9 @@ pub(crate) fn draft_swatch_grid(ui: &mut egui::Ui, current: Option<Rgb>, state: 
     swatch_grid_body(ui, current, state, true)
 }
 
+/// Render the shared palette and custom picker, updating `state` without editing a document.
+/// Draft mode returns RGB changes immediately and keeps the picker open; immediate-action
+/// mode returns custom colours only on Apply. Choosing a palette swatch closes either picker.
 fn swatch_grid_body(ui: &mut egui::Ui, current: Option<Rgb>, state: &mut ColourPickerDraft, draft: bool) -> Option<Rgb> {
     let mut picked = None;
     let on = |c: &Rgb| current.is_some_and(|cur| same_colour(&cur, c));

@@ -1121,6 +1121,7 @@ fn line_ending_properties_change_and_undo() {
     );
 }
 
+/// Appearance and author edits made in different properties tabs commit as one undoable change.
 #[test]
 fn comment_properties_change_appearance_and_author() {
     let mut h = harness(|app| app.set_option("quick", "square").unwrap());
@@ -1176,11 +1177,13 @@ fn type_custom_rgb(h: &mut Harness<'static, PdfCraftApp>, picker: usize, rgb: [u
     }
 }
 
+/// Read annotation zero from the active document, independently of its pending properties draft.
 fn current_comment_props(h: &Harness<'static, PdfCraftApp>) -> pdfcraft_engine::CommentProps {
     let app = h.state();
     app.session.get(app.views[0].id).unwrap().comment_props(0, 0).unwrap()
 }
 
+/// Compare document RGB channels with byte inputs, allowing less than half a quantization step.
 fn assert_custom_rgb(actual: Option<[f64; 3]>, expected: [u8; 3]) {
     let actual = actual.expect("a colour");
     for (actual, expected) in actual.into_iter().zip(expected) {
@@ -1221,6 +1224,8 @@ fn comment_properties_custom_colour_ok_commits_without_apply() {
     assert_eq!(comments(&h).len(), 1, "undo did not remove the annotation");
 }
 
+/// Cancel and Escape discard custom RGB edits without undo or recent-colour changes; reopening
+/// must start from the stored annotation rather than resurrecting the discarded picker.
 #[test]
 fn comment_properties_custom_colour_cancel_and_close_discard_and_reopen_cleanly() {
     let mut h = harness(|app| app.set_option("quick", "square").unwrap());
@@ -1258,6 +1263,8 @@ fn comment_properties_custom_colour_cancel_and_close_discard_and_reopen_cleanly(
     }
 }
 
+/// Independent stroke and fill drafts survive Appearance/General switches and commit together
+/// on OK, with one undo restoring both original colours.
 #[test]
 fn comment_properties_custom_colour_fill_and_stroke_survive_tab_changes() {
     let mut h = harness(|app| app.set_option("quick", "square").unwrap());
