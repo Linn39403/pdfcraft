@@ -1758,3 +1758,259 @@ fn an_imported_redaction_rect_with_a_non_number_is_not_used() {
     let mark = imported_redact_mark(fdf);
     assert!(mark.get(b"QuadPoints").is_none(), "quads were drawn from a malformed /Rect: {mark:?}");
 }
+
+#[test]
+fn a_colour_with_non_hex_digits_is_rejected() {
+    assert!(parse_hex("#+f+f+f").is_none());
+    assert!(parse_hex("#+1+2+3").is_none());
+    assert!(parse_hex("#-1-2-3").is_none());
+    assert!(parse_hex("#ff00zz").is_none());
+    assert_eq!(parse_hex("#FF8000").map(|c| c[0]), Some(1.0));
+}
+
+/// An FDF body with `body` as its `/FDF` dictionary contents and `objects` (numbered from 2).
+fn fdf_with(body: &str, objects: &[String]) -> Vec<u8> {
+    let mut out = format!("%FDF-1.2\n1 0 obj\n<< /FDF << {body} >> >>\nendobj\n");
+    for (i, o) in objects.iter().enumerate() {
+        out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 2));
+    }
+    out.push_str("trailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    out.into_bytes()
+}
+
+/// A field that lists itself as a kid is read once.
+#[test]
+fn an_fdf_field_listing_itself_is_read_once() {
+    let cyclic = fdf_with("/Fields [2 0 R]", &["<< /T (a) /V (x) /Kids [2 0 R] >>".into()]);
+    assert_eq!(data_values(&cyclic).unwrap(), vec![("a".to_string(), vec!["x".to_string()])]);
+}
+
+/// A field tree whose `/Kids` repeat one subtree level after level is refused rather than
+/// expanded into millions of rows.
+#[test]
+fn fdf_field_trees_that_repeat_references_are_bounded() {
+    let levels = 19;
+    let mut objects: Vec<String> = (0..levels).map(|i| format!("<< /T (f{i}) /V (x) /Kids [{n} 0 R {n} 0 R] >>", n = i + 3)).collect();
+    objects.push("<< /T (leaf) /V (x) >>".into());
+    let shared = fdf_with("/Fields [2 0 R]", &objects);
+    let read = data_values(&shared);
+    assert!(read.is_err(), "{} rows", read.map_or(0, |v| v.len()));
+    assert!(matches!(import(&mut blank(), &shared), Err(DataError::Malformed(_))));
+}
+
+fn fdf_note(data: &str) -> String {
+    format!("<< /Subtype /Text /Rect [0 0 9 9] /NM (n) /Page 0 /PCData {data} >>")
+}
+
+/// A comment property that refers back to the comment is copied once, not nested level after
+/// level.
+#[test]
+fn an_fdf_comment_referring_to_itself_is_copied_once() {
+    let cyclic = fdf_with("/Annots [2 0 R]", &[fdf_note("2 0 R")]);
+    let mut dst = blank();
+    assert_eq!(import(&mut dst, &cyclic).unwrap().comments, 1);
+    let placed = find_by_name(&dst, "n").unwrap();
+    let data = dst.get(placed).as_dict().unwrap().get(b"PCData").cloned();
+    assert!(!matches!(data, Some(Object::Dict(_))), "{data:?}");
+}
+
+/// A comment whose properties repeat one reference level after level is refused rather than
+/// copied into millions of values.
+#[test]
+fn fdf_comment_graphs_that_repeat_references_are_bounded() {
+    let note = fdf_note;
+    let width = 6;
+    let mut objects = vec![note("3 0 R")];
+    for i in 0..8 {
+        objects.push(format!("[{}]", vec![format!("{} 0 R", i + 4); width].join(" ")));
+    }
+    objects.push("(leaf)".into());
+    let shared = fdf_with("/Annots [2 0 R]", &objects);
+    assert!(matches!(import(&mut blank(), &shared), Err(DataError::Malformed(_))));
+}
+
+/// Line-ending names are attribute values: a name holding a quote or angle bracket cannot add
+/// attributes or elements to the exported XFDF.
+#[test]
+fn xfdf_line_ending_names_are_escaped() {
+    let mut doc = blank();
+    let page = pdfcraft_model::pages(&doc)[0].obj;
+    let hostile = b"a\" tail=\"x\"><field name=\"Name\"><value>pwned</value></field><b".to_vec();
+    let mut line = Dict::new();
+    line.set(b"Type".to_vec(), Object::name("Annot"));
+    line.set(b"Subtype".to_vec(), Object::name("Line"));
+    line.set(b"Rect".to_vec(), Object::Array(vec![10.into(), 20.into(), 30.into(), 40.into()]));
+    line.set(b"L".to_vec(), Object::Array(vec![10.into(), 20.into(), 30.into(), 40.into()]));
+    line.set(b"LE".to_vec(), Object::Array(vec![Object::Name(hostile.clone()), Object::Name(hostile.clone())]));
+    let line = doc.add(line);
+    doc.update_dict(page, |d| d.set(b"Annots".to_vec(), Object::Array(vec![Object::Ref(line)]))).unwrap();
+    let xml = export_xfdf(&doc, true, false, "form.pdf");
+    let parsed = roxmltree::Document::parse(&xml).unwrap();
+    assert!(!parsed.descendants().any(|n| n.has_tag_name("field")), "{xml}");
+    let el = parsed.descendants().find(|n| n.has_tag_name("line")).unwrap();
+    let want = String::from_utf8(hostile).unwrap();
+    assert_eq!((el.attribute("head"), el.attribute("tail")), (Some(want.as_str()), Some(want.as_str())));
+}
+
+/// A comment locked through an indirect `/F` is as protected from a same-named import as one
+/// with the flag written inline.
+#[test]
+fn a_comment_locked_by_an_indirect_flag_is_not_replaced_by_an_import() {
+    let mut doc = blank();
+    let page = pdfcraft_model::pages(&doc)[0].obj;
+    let flag = doc.add(Object::Int(128)); // Locked
+    let mut note = Dict::new();
+    note.set(b"Type".to_vec(), Object::name("Annot"));
+    note.set(b"Subtype".to_vec(), Object::name("Text"));
+    note.set(b"NM".to_vec(), PdfString::text("n1"));
+    note.set(b"Rect".to_vec(), Object::Array(vec![10.into(), 10.into(), 30.into(), 30.into()]));
+    note.set(b"F".to_vec(), Object::Ref(flag));
+    let note = doc.add(Object::Dict(note));
+    doc.update_dict(page, |p| p.set(b"Annots".to_vec(), Object::Array(vec![Object::Ref(note)]))).unwrap();
+    let before = doc.get(note);
+    let xfdf = br#"<xfdf><annots><text page="0" name="n1" rect="0,0,1,1"/></annots></xfdf>"#;
+    assert_eq!(import(&mut doc, xfdf).unwrap().comments, 1);
+    let annots = doc.get(page).as_dict().and_then(|p| p.get(b"Annots").and_then(Object::as_array).cloned()).unwrap();
+    assert!(annots.contains(&Object::Ref(note)), "the locked comment was replaced");
+    assert_eq!(doc.get(note), before, "the locked comment was changed");
+}
+
+#[test]
+fn import_skips_annotations_with_non_finite_coordinates() {
+    for rect in ["nan,10,100,100", "0,inf,100,100", "0,10,infinity,100", "0,10,100,-inf"] {
+        let mut doc = blank();
+        let xfdf = format!(
+            r#"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots><square page="0" rect="0,0,50,50" name="good"/><square page="0" rect="{rect}" name="bad"/></annots></xfdf>"#
+        );
+        let r = import(&mut doc, xfdf.as_bytes()).unwrap();
+        assert_eq!(r.comments, 1, "rect {rect}: {r:?}");
+        let names = annots_of(&doc);
+        assert_eq!(names.len(), 1, "rect {rect}: {names:?}");
+        assert_eq!(names[0].get(b"NM"), Some(&PdfString::literal(b"good".to_vec()).into()), "rect {rect}");
+    }
+}
+
+#[test]
+fn import_drops_non_finite_numbers_from_every_coordinate_list() {
+    let xfdf = r#"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <line page="0" rect="0,0,50,50" name="line" start="nan,0" end="10,10"/>
+        <polygon page="0" rect="0,0,50,50" name="poly"><vertices>1,2;inf,4;5,6</vertices></polygon>
+        <ink page="0" rect="0,0,50,50" name="ink"><inklist><gesture>1,2;3,-inf</gesture></inklist></ink>
+        <freetext page="0" rect="0,0,50,50" name="callout" callout="1,2,nan,4,5,6"/>
+        <highlight page="0" rect="0,0,50,50" name="hl" coords="0,0,infinity,0,0,10,10,10"/>
+        </annots></xfdf>"#;
+    let mut doc = blank();
+    let r = import(&mut doc, xfdf.as_bytes()).unwrap();
+    assert_eq!(r.comments, 5, "{r:?}");
+    fn finite(doc: &Document, o: &Object) -> bool {
+        match &*doc.resolve(o) {
+            Object::Real(x) => x.is_finite(),
+            Object::Array(a) => a.iter().all(|e| finite(doc, e)),
+            _ => true,
+        }
+    }
+    let annots = annots_of(&doc);
+    assert_eq!(annots.len(), 5);
+    for d in &annots {
+        for (k, v) in d.iter() {
+            if k.as_slice() != b"P" {
+                assert!(finite(&doc, v), "{d:?}");
+            }
+        }
+        assert!(d.get(b"L").is_none() && d.get(b"CL").is_none() && d.get(b"Vertices").is_none(), "{d:?}");
+    }
+}
+
+fn annots_of(doc: &Document) -> Vec<Dict> {
+    let page = &pdfcraft_model::pages(doc)[0];
+    page.dict
+        .get(b"Annots")
+        .map(|a| doc.resolve(a))
+        .and_then(|a| a.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .map(|a| doc.resolve(a).as_dict().cloned().unwrap())
+        .filter(|d| d.get(b"Subtype") != Some(&Object::name("Widget")))
+        .collect()
+}
+
+/// An empty text field exports as a `<field>` with no `<value>`, and the import skipped such a
+/// field, so importing the data left the target's old text in place. FDF, XML, CSV and text
+/// carry the same empty value and clear the field.
+#[test]
+fn an_empty_field_in_xfdf_clears_the_field_it_is_imported_into() {
+    let src = one_field();
+    assert_eq!(values(&src), vec![("Name".to_string(), Vec::<String>::new())]);
+    let exports = [
+        ("xfdf", export_xfdf(&src, false, true, "form.pdf").into_bytes()),
+        ("fdf", export_fdf(&src, false, true, "form.pdf").unwrap()),
+        ("xml", export_data(&src, Format::Xml).into_bytes()),
+    ];
+    for (format, data) in exports {
+        let mut dst = one_field();
+        set_value(&mut dst, "Name", &FieldValue::Text("Ada".into())).unwrap();
+        let report = import(&mut dst, &data);
+        assert_eq!(values(&dst), values(&src), "{format}: {report:?}: {}", String::from_utf8_lossy(&data));
+    }
+}
+
+/// A leaf holding only `<value-richtext>` is not read by the import, so it must leave the field
+/// as it was rather than clear it like an empty `<field>`.
+#[test]
+fn a_richtext_only_field_in_xfdf_leaves_the_field_alone() {
+    let data = br#"<?xml version="1.0" encoding="UTF-8"?>
+<xfdf xmlns="http://ns.adobe.com/xfdf/"><fields><field name="Name"><value-richtext><body xmlns="http://www.w3.org/1999/xhtml"><p>Bo</p></body></value-richtext></field></fields></xfdf>"#;
+    let mut dst = one_field();
+    set_value(&mut dst, "Name", &FieldValue::Text("Ada".into())).unwrap();
+    let report = import(&mut dst, data);
+    assert_eq!(values(&dst), vec![("Name".to_string(), vec!["Ada".to_string()])], "{report:?}");
+}
+
+/// An FDF comment's pop-up is an annotation of its own (`/Popup` → a `/Subtype /Popup` object
+/// with `/Parent`). The import copied the pop-up's dictionary into the comment as a direct value,
+/// which ISO 32000-2 Table 172 says shall be an indirect reference to an annotation on the page.
+/// The import now places a pop-up of its own, as the XFDF import does, keeping its place and
+/// open state.
+#[test]
+fn an_fdf_comment_popup_is_not_copied_in_as_a_direct_dictionary() {
+    let fdf = fdf_with(
+        "/Annots [2 0 R 3 0 R]",
+        &[
+            "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /NM (n) /Page 0 /Contents (note) /Popup 3 0 R >>".into(),
+            "<< /Type /Annot /Subtype /Popup /Rect [40 10 140 60] /Parent 2 0 R /Page 0 /Open true >>".into(),
+        ],
+    );
+    let mut dst = blank();
+    assert_eq!(import(&mut dst, &fdf).unwrap().comments, 1);
+    let note = find_by_name(&dst, "n").unwrap();
+    let popup = dst.get(note).as_dict().unwrap().get(b"Popup").cloned();
+    let page = pdfcraft_model::pages(&dst)[0].dict.get(b"Annots").map(|a| dst.resolve(a)).and_then(|a| a.as_array().cloned()).unwrap();
+    let pr = popup.as_ref().and_then(Object::as_ref).filter(|r| page.contains(&Object::Ref(*r)));
+    let pr = pr.unwrap_or_else(|| panic!("/Popup must be a reference to an annotation on the page: {popup:?}"));
+    let pd = dst.get(pr).as_dict().cloned().unwrap();
+    assert_eq!(pd.name(b"Subtype"), Some(b"Popup".as_slice()));
+    assert_eq!(pd.get(b"Parent"), Some(&Object::Ref(note)));
+    assert_eq!(pd.get(b"Open"), Some(&Object::Bool(true)));
+    let rect: Vec<f64> = pd.get(b"Rect").and_then(Object::as_array).unwrap().iter().filter_map(Object::as_f64).collect();
+    assert_eq!(rect, [40.0, 10.0, 140.0, 60.0]);
+}
+
+/// A pop-up without a usable `/Rect` cannot be placed: the comment still imports, with no
+/// `/Popup` at all (neither the FDF's dictionary copied in nor a pop-up on the page).
+#[test]
+fn an_fdf_comment_popup_without_a_rect_is_dropped() {
+    let fdf = fdf_with(
+        "/Annots [2 0 R 3 0 R]",
+        &[
+            "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /NM (n) /Page 0 /Contents (note) /Popup 3 0 R >>".into(),
+            "<< /Type /Annot /Subtype /Popup /Parent 2 0 R /Page 0 /Open true >>".into(),
+        ],
+    );
+    let mut dst = blank();
+    assert_eq!(import(&mut dst, &fdf).unwrap().comments, 1);
+    let note = find_by_name(&dst, "n").unwrap();
+    assert!(dst.get(note).as_dict().unwrap().get(b"Popup").is_none());
+    let page = pdfcraft_model::pages(&dst)[0].dict.get(b"Annots").map(|a| dst.resolve(a)).and_then(|a| a.as_array().cloned()).unwrap();
+    let popups = page.iter().filter(|a| dst.resolve(a).as_dict().is_some_and(|d| d.name(b"Subtype") == Some(b"Popup".as_slice()))).count();
+    assert_eq!(popups, 0);
+}

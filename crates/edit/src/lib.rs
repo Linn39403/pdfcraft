@@ -57,7 +57,9 @@ pub struct HeaderFooter {
     /// Left, centre and right header text, then left, centre and right footer text. Tokens:
     /// `<<1>>` page number, `<<n>>` page count, `<<1 of n>>`, `<<1/n>>`, `<<Page 1>>`,
     /// `<<Page 1 of n>>`, dates `<<m/d/yyyy>>`, `<<mm/dd/yyyy>>`, `<<d/m/yyyy>>`, `<<yyyy-mm-dd>>`,
-    /// `<<yyyy/mm/dd>>`, `<<yyyy/m/d>>`, `<<m/d/yy>>`, `<<mmmm d, yyyy>>`, and Bates numbers `<<Bates Number#6#1#PRE#SUF>>`
+    /// `<<yyyy/mm/dd>>`, `<<yyyy/m/d>>`, `<<m/d/yy>>`, `<<mmmm d, yyyy>>`, the dotted day-first
+    /// dates of German-speaking and much of Central and Eastern Europe `<<dd.mm.yyyy>>`,
+    /// `<<d.m.yyyy>>`, `<<dd.mm.yy>>`, `<<d.m.yy>>`, and Bates numbers `<<Bates Number#6#1#PRE#SUF>>`
     /// (digits, start, prefix, suffix).
     pub text: [String; 6],
     /// The standard face the text is drawn in (#3754): Helvetica (the default), Times or Courier.
@@ -297,6 +299,10 @@ pub fn expand(template: &str, page_number: u32, count: usize, bates: u64, cx: &C
             "d/m/yy" => format!("{d}/{m}/{:02}", y.rem_euclid(100)),
             "d/m/yyyy" => format!("{d}/{m}/{y}"),
             "dd/mm/yyyy" => format!("{d:02}/{m:02}/{y}"),
+            "d.m.yy" => format!("{d}.{m}.{:02}", y.rem_euclid(100)),
+            "d.m.yyyy" => format!("{d}.{m}.{y}"),
+            "dd.mm.yy" => format!("{d:02}.{m:02}.{:02}", y.rem_euclid(100)),
+            "dd.mm.yyyy" => format!("{d:02}.{m:02}.{y}"),
             "yyyy-mm-dd" => format!("{y}-{m:02}-{d:02}"),
             "yyyy/mm/dd" => format!("{y}/{m:02}/{d:02}"),
             "yyyy/m/d" => format!("{y}/{m}/{d}"),
@@ -492,6 +498,9 @@ enum Isolation {
     /// the count of `q` left open at the end, when known. `marked` counts known unfinished
     /// marked-content sequences independently of graphics malformation, or zero when unknown.
     Unknown { unclosed: usize, marked: usize },
+    /// Marked content nests past [`ISOLATION_MAX_DEPTH`]: how many sequences a mark on top would
+    /// have to close (some may be hidden optional content) is unknown.
+    TooDeep,
 }
 
 const ISOLATION_MAX_STREAMS: usize = 100_000;
@@ -591,7 +600,10 @@ fn isolation(doc: &Document, list: &[Object]) -> Isolation {
             _ => {}
         }
     }
-    if malformed || text_open || path_open || !stack.is_empty() || !marked_known {
+    if !marked_known {
+        return Isolation::TooDeep;
+    }
+    if malformed || text_open || path_open || !stack.is_empty() {
         return Isolation::Unknown { unclosed: if malformed { 0 } else { stack.len() }, marked };
     }
     let comment_open = edges.last().is_some_and(|edge| edge.1);
@@ -608,8 +620,8 @@ fn place(doc: &mut Document, page: &pdfcraft_model::Page, kind: MarkKind, conten
 /// content before leaves set (a `cm`, a clip, text state…) must not reach the mark, including
 /// content appended after an earlier PdfCraft wrapper by another tool (#3084): the stretch of
 /// content that leaves state set is wrapped in q/Q, once. Any known unfinished marked-content
-/// sequences are closed at the end too, so hidden optional content cannot hide the new mark.
-/// Returns the new content stream.
+/// sequences are closed at the end too, so hidden optional content cannot hide the new mark; when
+/// their number is unknown, nothing is placed on top. Returns the new content stream.
 fn place_tagged(doc: &mut Document, page: &pdfcraft_model::Page, tag: &str, content: Vec<u8>, behind: bool) -> Result<ObjRef, EditError> {
     let mut list = contents(doc, page)?;
     // The behind-marks at the start: backgrounds in the order added, then watermarks.
@@ -624,6 +636,8 @@ fn place_tagged(doc: &mut Document, page: &pdfcraft_model::Page, tag: &str, cont
             // behind-marks at the start. A `q` it leaves open is closed at its end, where
             // closing it changes nothing already drawn.
             Isolation::Unknown { unclosed, marked } => (behind_marks < list.len()).then_some((behind_marks, unclosed, marked)),
+            // Content left inside an optional-content sequence it cannot close could be hidden.
+            Isolation::TooDeep => return Err(too_deep_on_top()),
         }
     };
     let mark_ref = doc.add(Object::Stream(Stream::flate(tagged(tag), &content)));
@@ -651,6 +665,26 @@ fn place_tagged(doc: &mut Document, page: &pdfcraft_model::Page, tag: &str, cont
     Ok(mark_ref)
 }
 
+fn too_deep_on_top() -> EditError {
+    EditError::Invalid("the page's marked content is nested too deeply to add anything on top of it".into())
+}
+
+/// The refusal [`place_tagged`] gives for a mark on top of `page`, checked before an edit changes
+/// anything (removing old marks, adding resources) so a refused edit leaves the document as it was.
+fn check_on_top(doc: &Document, page: &pdfcraft_model::Page) -> Result<(), EditError> {
+    let obj = doc.get(page.obj);
+    let list = match obj.as_dict().and_then(|d| d.get(b"Contents")) {
+        None => return Ok(()),
+        Some(Object::Ref(r)) => doc.get(*r).as_array().cloned().unwrap_or_else(|| vec![Object::Ref(*r)]),
+        Some(Object::Array(a)) => a.clone(),
+        Some(other) => vec![other.clone()],
+    };
+    match isolation(doc, &list) {
+        Isolation::TooDeep => Err(too_deep_on_top()),
+        _ => Ok(()),
+    }
+}
+
 /// Put content tagged `tag` first inside the q/Q wrapper, so it applies to the page's original
 /// content and nothing else (a header's shrink). A page without a wrapper has no original content
 /// on it and is left alone.
@@ -670,6 +704,7 @@ fn place_inside_wrapper(doc: &mut Document, page: &pdfcraft_model::Page, tag: &s
 pub fn stamp(doc: &mut Document, page: usize, tag: &str, content: Vec<u8>) -> Result<ObjRef, EditError> {
     let all = page_list(doc);
     check(&[page], all.len())?;
+    check_on_top(doc, &all[page])?;
     add_resources(doc, &all[page], None, Some(&content))?;
     let p = page_list(doc).swap_remove(page);
     place_tagged(doc, &p, tag, content, false)
@@ -749,6 +784,9 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
         .iter()
         .map(|&i| hf.shrink.then(|| shrink_matrix(hf, all[i].display_size(doc), all[i].view_matrix(doc))).transpose())
         .collect::<Result<Vec<_>, _>>()?;
+    for &i in pages {
+        check_on_top(doc, &all[i])?;
+    }
     if replace {
         remove_marks(doc, pages, MarkKind::HeaderFooter)?;
     }
@@ -836,6 +874,11 @@ pub fn add_watermark(doc: &mut Document, pages: &[usize], wm: &Watermark, replac
         && wm.offset.iter().all(|o| o.is_finite()))
     {
         return Err(EditError::Invalid("invalid watermark settings".into()));
+    }
+    if !wm.behind {
+        for &i in pages {
+            check_on_top(doc, &all[i])?;
+        }
     }
     if replace {
         remove_marks(doc, pages, MarkKind::Watermark)?;
@@ -941,7 +984,7 @@ pub fn remove_marks(doc: &mut Document, pages: &[usize], kind: MarkKind) -> Resu
         if before != kept.len() {
             let wrappers = match isolation(doc, &kept) {
                 Isolation::Clean { wrappers, .. } => wrappers,
-                Isolation::Unknown { .. } => {
+                Isolation::Unknown { .. } | Isolation::TooDeep => {
                     let mut opens = Vec::new();
                     let mut pairs = Vec::new();
                     for (i, o) in kept.iter().enumerate() {
@@ -997,12 +1040,12 @@ mod linebreak;
 pub mod text;
 pub use text::{
     BlockKey, BlockStyle, LineEdit, MAX_FORM_DEPTH, MAX_FORM_VISITS, RangeStyle, ReadingBlocks, TextBlock, TextLine, TextSession, block_overlapping,
-    clear_block, reading_blocks, reading_blocks_checked, replace_block, replace_line, rewrite_block, text_blocks, text_lines,
+    clear_block, glyph_text_lines, reading_blocks, reading_blocks_checked, replace_block, replace_line, rewrite_block, text_blocks, text_lines,
 };
 pub mod added;
 pub use added::{
-    Added, AddedImage, AddedText, Align, Content, Family, MarkerScan, add_content, delete_content, first_undrawable, list_added, scan_markers,
-    update_content,
+    Added, AddedImage, AddedText, Align, Content, Family, MarkerScan, add_content, delete_content, first_undrawable, isolate_content, list_added,
+    scan_markers, update_content,
 };
 
 #[cfg(test)]
