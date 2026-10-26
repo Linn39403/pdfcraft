@@ -9175,3 +9175,60 @@ fn page_render_draws_stamps_without_an_appearance() {
     let grey = custom.iter().filter(|p| p[0].abs_diff(p[1]) < 24 && p[1].abs_diff(p[2]) < 24).count();
     assert!(grey > 100 && grey == custom.len(), "an unknown name is a grey placeholder: {grey} of {}", custom.len());
 }
+
+/// #4786: headless callers can identify clipping masks without losing their paragraph numbers.
+#[test]
+fn text_paragraphs_report_clipping_eligibility_without_filtering() {
+    let dir = workdir("paragraph-clipping-eligibility");
+    let mut masks: Vec<String> = (4..=7).map(|mode| format!("BT {mode} Tr /F1 24 Tf 40 500 Td (MASK) Tj ET")).collect();
+    masks.push("BT /F1 24 Tf 40 500 Td 0 Tr (TITLE) Tj 7 Tr (MASK) Tj ET".into());
+    masks.push("BT 0 Tr /F1 24 Tf 40 500 Td (MASK) Tj ET BT 7 Tr /F1 24 Tf 40 500 Td (MASK) Tj ET".into());
+    for (case, mask) in masks.iter().enumerate() {
+        let body = format!("q {mask} 1 0 0 rg 0 0 612 792 re f Q BT 0 Tr /F1 12 Tf 40 700 Td (Ordinary) Tj ET");
+        std::fs::write(dir.join("mask.pdf"), win_ansi_paragraph_pdf(&body)).unwrap();
+        let mut a = auto(&dir);
+        let doc = ok(&mut a, "doc_open", json!({"path":"mask.pdf"}))["doc"].as_u64().unwrap();
+        let before = ok(&mut a, "doc_info", json!({"doc":doc}));
+        let bytes = a.session().save_bytes(pdfcraft_engine::DocId(doc)).unwrap();
+        let extracted = page_text(&mut a, doc);
+        let rendered = a.call("page_render", &json!({"doc":doc,"page":1,"dpi":36})).unwrap();
+        let listed = ok(&mut a, "text_paragraphs", json!({"doc":doc,"page":1}));
+        let paragraphs = listed["paragraphs"].as_array().unwrap();
+        assert_eq!(listed["count"].as_u64().unwrap() as usize, paragraphs.len());
+        let ordinary = paragraphs.iter().find(|p| p["text"] == "Ordinary").unwrap();
+        assert_eq!(ordinary["editable"], true, "case {case}: {ordinary}");
+        assert_eq!(ordinary.get("non_editable_reason"), Some(&Value::Null));
+        let ordinary_number = ordinary["paragraph"].as_u64().unwrap();
+        let mut blocked = 0;
+        for (index, paragraph) in paragraphs.iter().enumerate() {
+            assert_eq!(paragraph["paragraph"], index + 1, "listing does not filter or renumber masks");
+            if paragraph["text"] == "Ordinary" {
+                continue;
+            }
+            blocked += 1;
+            assert!(paragraph["text"].as_str().unwrap().contains("MASK"), "{paragraph}");
+            assert_eq!(paragraph["editable"], false, "case {case}: {paragraph}");
+            assert!(paragraph["non_editable_reason"].as_str().unwrap().contains("clipping path"), "{paragraph}");
+            let number = paragraph["paragraph"].as_u64().unwrap();
+            let refused = err(&mut a, "text_edit", json!({"doc":doc,"page":1,"paragraph":number,"text":"Changed"}));
+            assert!(refused.to_string().contains("clipping path"), "case {case}: {refused}");
+            let preview = err(&mut a, "page_render", json!({"doc":doc,"page":1,"hide_text_block":number,"dpi":36}));
+            assert!(preview.to_string().contains("clipping path"), "case {case}: {preview}");
+        }
+        assert!(blocked > 0, "case {case}: masks remain listed");
+        assert_eq!(ok(&mut a, "doc_info", json!({"doc":doc})), before, "refusal preserves dirty/undo/redo state");
+        assert_eq!(a.session().save_bytes(pdfcraft_engine::DocId(doc)).unwrap(), bytes, "refusal preserves saved bytes");
+        assert_eq!(page_text(&mut a, doc), extracted, "refusal preserves extracted text");
+        assert_eq!(ok(&mut a, "text_paragraphs", json!({"doc":doc,"page":1})), listed);
+        assert_eq!(a.call("page_render", &json!({"doc":doc,"page":1,"dpi":36})).unwrap(), rendered, "mask artwork survives");
+        ok(&mut a, "text_edit", json!({"doc":doc,"page":1,"paragraph":ordinary_number,"text":"Edited ordinary"}));
+        let after = ok(&mut a, "text_paragraphs", json!({"doc":doc,"page":1}));
+        let edited = after["paragraphs"].as_array().unwrap().iter().find(|p| p["text"] == "Edited ordinary").unwrap();
+        assert_eq!(edited["editable"], true);
+        assert_eq!(edited["paragraph"], ordinary_number, "unchanged layout keeps the same numbering");
+        ok(&mut a, "doc_save", json!({"doc":doc,"path":"saved.pdf"}));
+        let reopened = ok(&mut a, "doc_open", json!({"path":"saved.pdf"}))["doc"].as_u64().unwrap();
+        assert_eq!(ok(&mut a, "text_paragraphs", json!({"doc":reopened,"page":1})), after, "eligibility survives save/reopen");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

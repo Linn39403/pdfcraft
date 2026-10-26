@@ -10,6 +10,15 @@ moved because an earlier row wrapped, are rewritten, and formatting a selection 
 only the rows it covers. Changing the whole paragraph's formatting, width or position rewrites
 every row.
 
+Text that defines a clipping path (`4 Tr` through `7 Tr`) remains available to text
+extraction, but is not offered as an editable paragraph: removing its glyphs would remove
+the mask shaping the artwork. Hovering it explains why without opening an editor or changing
+the document. The same restriction applies when an ordinary run shares a paragraph with a
+mask, or its replacement would remove a coincident mask. This is distinct from ordinary text
+painted inside an existing path clip. `text_paragraphs` preserves all paragraph numbers and
+reports `editable` and `non_editable_reason`; eligibility is a preflight check, not a promise
+that every replacement font, character or style can be supported.
+
 Add Text also opens existing text when it is clicked; a blank-space click starts a new item.
 Both text tools retype an added text item with one click. Draft boxes grow to the page edge
 before wrapping, and the saved item uses that width. A single visual source row grows across font/style boundaries;

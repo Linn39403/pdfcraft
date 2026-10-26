@@ -7457,3 +7457,59 @@ fn a_run_of_spaces_in_a_subset_without_a_space_glyph_keeps_its_width() {
     let content = String::from_utf8_lossy(&page_content_bytes(&reopen(&doc), 0)).into_owned();
     assert_eq!(content.matches("[-330] TJ").count(), 5, "{content}");
 }
+
+/// Listing keeps masks readable and numbered, but identifies the refusal before editing (#4786).
+#[test]
+fn paragraph_listing_flags_every_clipping_mode_without_losing_text() {
+    for mode in 0..=7 {
+        let doc = clipping_text_page(mode);
+        let blocks = text::text_blocks(&doc, 0).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "MASK");
+        assert_eq!(blocks[0].editor_text, "MASK");
+        assert_eq!(blocks[0].lines, vec![0]);
+        if mode >= 4 {
+            assert!(
+                blocks[0].non_editable_reason.as_deref().is_some_and(|reason| reason.contains("clipping path")),
+                "mode {mode}: {:?}",
+                blocks[0].non_editable_reason
+            );
+        } else {
+            assert_eq!(blocks[0].non_editable_reason, None, "mode {mode}");
+        }
+    }
+}
+
+/// The preflight uses the same dropped runs as rewriting, including mixed runs and mask copies.
+#[test]
+fn paragraph_listing_flags_mixed_runs_and_coincident_masks() {
+    for content in [
+        "q BT /F1 48 Tf 40 60 Td 0 Tr (TITLE) Tj 7 Tr (MASK) Tj ET 1 0 0 rg 0 0 300 150 re f Q",
+        "q BT 0 Tr /F1 48 Tf 40 60 Td (MASK) Tj ET BT 7 Tr /F1 48 Tf 40 60 Td (MASK) Tj ET 1 0 0 rg 0 0 300 150 re f Q",
+    ] {
+        let doc = text_page(content);
+        let blocks = text::text_blocks(&doc, 0).unwrap();
+        assert!(!blocks.is_empty());
+        for block in &blocks {
+            assert!(block.non_editable_reason.as_deref().is_some_and(|reason| reason.contains("clipping path")));
+        }
+        for index in 0..blocks.len() {
+            let mut preview = doc.clone();
+            let before = pdfcraft_cos::write_full(&preview, &SaveOptions::default()).unwrap();
+            assert!(text::clear_block(&mut preview, 0, index).is_err());
+            assert_eq!(pdfcraft_cos::write_full(&preview, &SaveOptions::default()).unwrap(), before);
+            assert!(text::rewrite_block(&mut preview, 0, index, Some("EDITED"), &BlockStyle::default()).is_err());
+            assert_eq!(pdfcraft_cos::write_full(&preview, &SaveOptions::default()).unwrap(), before);
+        }
+    }
+}
+
+/// Text painted inside an existing path clip does not itself define the clip (#4708 is separate).
+#[test]
+fn paragraph_listing_keeps_ordinary_path_clipped_text_eligible() {
+    let doc = text_page("q 0 0 300 150 re W n BT /F1 12 Tf 40 60 Td (PLAIN) Tj ET Q");
+    let blocks = text::text_blocks(&doc, 0).unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].text, "PLAIN");
+    assert_eq!(blocks[0].non_editable_reason, None);
+}

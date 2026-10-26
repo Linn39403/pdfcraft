@@ -1187,6 +1187,9 @@ fn open_editor(
 ) {
     view.pending_text_open = None;
     let (Some(l), Some(b)) = (lines.get(block), boxes.get(block)) else { return };
+    if l.non_editable_reason.is_some() {
+        return;
+    }
     view.image_selection = None;
     let source_lines = doc.text_lines(page);
     let text = l.editor_text.clone();
@@ -1245,7 +1248,7 @@ pub(crate) fn page_input(
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(xf.rect.expand(1.0)));
     let active = view.line_editor.as_ref().filter(|e| e.page == page).map(|e| e.block);
     for (i, b) in boxes.iter().enumerate() {
-        if active != Some(i) {
+        if active != Some(i) && lines.get(i).is_some_and(|line| line.non_editable_reason.is_none()) {
             painter.rect_stroke(*b, CornerRadius::same(2), Stroke::new(0.75, ACCENT.gamma_multiply(0.35)), egui::StrokeKind::Outside);
         }
     }
@@ -1324,11 +1327,30 @@ pub(crate) fn page_input(
         && let Some(o) = ptr.origin
         && let Some((block, grip)) = grab_at(&boxes, o, upright)
     {
+        if lines.get(block).is_some_and(|line| line.non_editable_reason.is_some()) {
+            view.objects.hold_editor = view.line_editor.is_some();
+            return true;
+        }
         view.block_drag = Some(BlockDrag { page, block, generation: doc.edit_generation(), start: o, grip });
         return true;
     }
     let Some(p) = ptr.within(xf.rect) else { return false };
     let Some((hit, grip)) = grab_at(&boxes, p, upright) else { return false };
+    // Keep the inventory and its paragraph indexes intact, but never offer a rewrite that
+    // preflight already knows would destroy a text clipping mask. Consume the gesture so it
+    // cannot fall through to overlapping artwork or create an added-text layer instead.
+    if let Some(reason) = lines.get(hit).and_then(|line| line.non_editable_reason.as_deref()) {
+        // A rejected click must not apply another paragraph's draft through focus loss.
+        // Mere hover must not steal focus from the format controls.
+        if ptr.primary_down || resp.clicked() || resp.drag_stopped() {
+            view.objects.hold_editor = view.line_editor.is_some();
+        }
+        if resp.contains_pointer() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
+            resp.clone().on_hover_text(reason);
+        }
+        return true;
+    }
     if active != Some(hit) {
         painter.rect_stroke(boxes[hit], CornerRadius::same(2), Stroke::new(1.5, ACCENT), egui::StrokeKind::Outside);
     }

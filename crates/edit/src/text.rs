@@ -398,10 +398,14 @@ struct Origin {
     bt_state: TextState,
 }
 
-/// An editable text region: adjacent runs on visual rows, followed by aligned rows.
+/// A text region: adjacent runs on visual rows, followed by aligned rows.
 /// A region may contain several source fonts, sizes, colours and weights.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextBlock {
+    /// A known reason this paragraph cannot be edited, populated by [`text_blocks`].
+    /// `None` means no preflight refusal, not a guarantee that every replacement is supported.
+    /// Read-only extraction retains all paragraphs and their original indexes.
+    pub non_editable_reason: Option<String>,
     /// The lines' text joined with spaces (lines that ended in a hyphen are joined directly).
     pub text: String,
     pub rect: [f64; 4],
@@ -2460,6 +2464,9 @@ pub fn replace_line(doc: &mut Document, page: usize, line: usize, text: &str) ->
     Ok(edit)
 }
 
+/// Why removing text that defines a clipping mask is unsafe.
+const CLIPPING_TEXT_REASON: &str = "text used as a clipping path cannot be edited: its glyphs mask the artwork behind them";
+
 /// Refuses a rewrite that would remove text drawn as a clipping path (`4 Tr` to `7 Tr`). Such
 /// glyphs are not ink but a mask, and whatever is painted through them takes their shape.
 /// Removing the glyphs removes the mask, and the fill or image behind floods its own rectangle
@@ -2471,7 +2478,7 @@ pub fn replace_line(doc: &mut Document, page: usize, line: usize, text: &str) ->
 /// overlapping line without regard to its mode -- so a mask could go with text that is ink.
 fn refuse_clipping_text(lines: &[TextLine], dropped: &std::collections::HashSet<usize>) -> Result<(), EditError> {
     if lines.iter().any(|l| l.clips && l.ops.iter().any(|op| dropped.contains(op))) {
-        return Err(EditError::Invalid("text used as a clipping path cannot be edited: its glyphs mask the artwork behind them".into()));
+        return Err(EditError::Invalid(CLIPPING_TEXT_REASON.into()));
     }
     Ok(())
 }
@@ -2677,10 +2684,31 @@ pub fn block_overlapping(blocks: &[TextBlock], rect: [f64; 4]) -> Option<usize> 
     blocks.iter().enumerate().map(|(i, b)| (i, area(b))).filter(|(_, a)| *a > 0.0).max_by(|(_, a), (_, b)| a.total_cmp(b)).map(|(i, _)| i)
 }
 
-/// The paragraphs on a page (0-based).
+/// All paragraphs on a page (0-based), including those with a known editing refusal.
+/// Their text, grouping and indexes are unchanged; frontends should inspect
+/// [`TextBlock::non_editable_reason`] before offering an editor.
 pub fn text_blocks(doc: &Document, page: usize) -> Result<Vec<TextBlock>, EditError> {
     let lines = text_lines(doc, page)?;
-    Ok(group_blocks(&lines))
+    let mut blocks = group_blocks(&lines);
+    let has_clipping_text = lines.iter().any(|line| line.clips);
+    for block in &mut blocks {
+        let members: Vec<&TextLine> = block.lines.iter().filter_map(|i| lines.get(*i)).collect();
+        // Use the rewrite's exact drop set: a mask can share an ink run, or be a separate
+        // coincident copy. Skip the page-wide copy search when there is no mask to remove.
+        let clipping = if members.iter().any(|line| line.clips) {
+            // A direct mask always belongs to the drop set. Avoid a page-wide copy search
+            // for every paragraph on all-mask exports.
+            Some(EditError::Invalid(CLIPPING_TEXT_REASON.into()))
+        } else if has_clipping_text {
+            let mut dropped = coincident_ops(&lines, &members);
+            dropped.extend(members.iter().flat_map(|line| line.ops.iter().copied()));
+            refuse_clipping_text(&lines, &dropped).err()
+        } else {
+            None
+        };
+        block.non_editable_reason = clipping.map(|error| error.to_string()).or_else(|| members.iter().find_map(|line| line.unreadable_mode.clone()));
+    }
+    Ok(blocks)
 }
 
 /// Remove a paragraph's glyphs for a temporary editor background. Numeric TJ adjustments
@@ -3527,6 +3555,7 @@ pub(crate) fn translate_blocks(doc: &mut Document, page: usize, indexes: &[usize
 mod tests {
     use super::*;
 
+    /// A synthetic paragraph for key matching and overlap tests.
     fn block(text: &str, rect: [f64; 4]) -> TextBlock {
         TextBlock {
             text: text.into(),
@@ -3542,6 +3571,7 @@ mod tests {
             editor_text: text.into(),
             spans: Vec::new(),
             invisible: false,
+            non_editable_reason: None,
         }
     }
 
