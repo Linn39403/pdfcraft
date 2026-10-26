@@ -566,10 +566,53 @@ mod cups_options {
         std::fs::write(&blocker, "").unwrap();
         let unreadable = spool::load_printer_options_via_within("Office", &blocker, command(&dir, ""), LIMIT, "en");
         assert!(unreadable.diagnostic.as_deref().is_some_and(|d| d.contains("not-a-directory")), "{unreadable:?}");
-        std::fs::write(dir.join("Office.ppd"), "*PPD-Adobe: \"4.3\"\n").unwrap();
+        std::fs::write(
+            dir.join("Office.ppd"),
+            "*PPD-Adobe: \"4.3\"\n*OpenUI *PageSize/Paper size: PickOne\n*PageSize A4/A4: \"\"\n*CloseUI: *PageSize\n",
+        )
+        .unwrap();
         let empty = spool::load_printer_options_via_within("Office", &dir, command(&dir, ""), LIMIT, "en");
         assert!(empty.options.is_empty());
         assert_eq!(empty.diagnostic, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Header-only files and lookalike markers must not claim the printer has no settings.
+    #[test]
+    fn missing_option_declarations_report_a_discovery_diagnostic() {
+        let dir = folder();
+        for ppd in [
+            "",
+            "not a PPD\n",
+            "*OpenUI *Bad Key/Label: PickOne\n",
+            "*OpenUI *InputSlot/Tray:\n",
+            "*PPD-Adobe: \"4.3\"\n",
+            "*% Example: *OpenUI *InputSlot/Tray: PickOne\n",
+            "*OpenUIBogus *InputSlot/Tray: PickOne\n",
+            "*OpenUI *Broken\n",
+        ] {
+            std::fs::write(dir.join("Office.ppd"), ppd).unwrap();
+            let result = spool::load_printer_options_via_within("Office", &dir, command(&dir, ""), LIMIT, "en");
+            assert!(result.options.is_empty());
+            let diagnostic = result.diagnostic.as_deref().unwrap_or_default();
+            assert!(diagnostic.contains("Office.ppd") && diagnostic.contains("*OpenUI"), "{ppd:?}: {result:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Recognized options intentionally omitted from Properties still mean a successful read.
+    #[test]
+    fn handled_and_installable_options_remain_successfully_empty() {
+        let dir = folder();
+        for ppd in [
+            "*OpenUI *PageSize/Paper size: PickOne\n*PageSize A4/A4: \"\"\n*CloseUI: *PageSize\n*OpenUI *Duplex/Two sided: PickOne\n*Duplex None/One sided: \"\"\n*CloseUI: *Duplex\n",
+            "*OpenGroup: InstallableOptions/Hardware\n*OpenUI *Finisher/Finisher: PickOne\n*Finisher None/Not installed: \"\"\n*CloseUI: *Finisher\n*CloseGroup: InstallableOptions\n",
+        ] {
+            std::fs::write(dir.join("Office.ppd"), ppd).unwrap();
+            let result = spool::load_printer_options_via_within("Office", &dir, command(&dir, ""), LIMIT, "en");
+            assert!(result.options.is_empty());
+            assert_eq!(result.diagnostic, None, "{ppd:?}");
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 

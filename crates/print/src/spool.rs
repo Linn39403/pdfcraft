@@ -140,6 +140,22 @@ pub(crate) fn printer_options_via_within(
     load_printer_options_via_within(printer, ppd_dir, lpoptions, limit, lang).options
 }
 
+/// Recognize option declarations, including options deliberately filtered from Properties.
+/// This detects missing discovery data, not whether the whole PPD is valid or blocks are complete.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+fn has_ppd_option_declaration(ppd: &str) -> bool {
+    ppd.lines().any(|line| {
+        let Some(rest) = line.strip_prefix("*OpenUI").filter(|rest| rest.starts_with(char::is_whitespace)) else { return false };
+        let Some((head, kind)) = rest.trim().rsplit_once(':') else { return false };
+        let head = head.trim().trim_start_matches('*');
+        let key = head.split_once('/').map_or(head, |(key, _)| key).trim();
+        !kind.trim().is_empty()
+            && !key.is_empty()
+            && key.len() <= 64
+            && key.bytes().all(|b| b.is_ascii_graphic() && !matches!(b, b'/' | b':' | b'=' | b'"'))
+    })
+}
+
 /// Read options without hiding file or helper failures; retain any usable PPD defaults.
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 pub(crate) fn load_printer_options_via_within(
@@ -181,7 +197,14 @@ pub(crate) fn load_printer_options_via_within(
             diagnostics.push(format!("Could not read printer settings from {}: {e}. Check the queue's PPD file and its permissions.", path.display()))
         })
         .ok();
-    let mut options = ppd.as_deref().map(|b| parse_ppd(&ppd_text(b))).unwrap_or_default();
+    let mut options = ppd.as_deref().map(|b| {
+        let text = ppd_text(b);
+        let options = parse_ppd(&text);
+        if options.is_empty() && !has_ppd_option_declaration(&text) {
+            diagnostics.push(format!("No recognizable *OpenUI option declarations were found in {}. Check the queue's PPD file; printer-specific settings could not be discovered.", path.display()));
+        }
+        options
+    }).unwrap_or_default();
     if let Some(b) = &ppd {
         localize(&mut options, b, lang);
     }
