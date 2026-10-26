@@ -1,5 +1,7 @@
 # PdfCraft roadmap
 
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (PR #2732 review documentation: completed Fontconfig work and legacy-date migration; behavior and estimates unchanged)
+
 > **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** minor (M5/M14 #2664: migrate legacy default date settings to automatic; preserve custom and new explicit patterns; estimates unchanged)
 **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
 
@@ -200,6 +202,7 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 
 ## Progress log
 
+- **2026-10-26 (M5/M14, #2732 review):** Corrected the parity note to match tested legacy-default migration, added its regression as evidence, and separated completed Fontconfig work from the M14 missing list. Documentation only; runtime behavior and estimates unchanged.
 - **2026-10-26 (M5/M14, #2664 refresh):** Integrated upstream `13bfbd07`, preserving the locale regressions, new upstream automation cases, contributor credits and roadmap history. Locale behavior and estimates unchanged.
 - **2026-10-24 (M10, #4158 partial):** Word, HTML, RTF and PowerPoint export keep a block that continues another on its line (an italic case name, a link, a superscript) as a run in its own style inside that paragraph, with the source's word space, instead of a paragraph of its own. Style changes that wrap onto the next line still split paragraphs (the reading blocks keep style boundaries). Estimates unchanged.
 - **2026-10-24 (M3, window move on Wayland, #3970 follow-up):** After a move or resize by PdfCraft's own title bar or edges, the button release given back to egui goes before the pointer leaving the window, so hover no longer sticks at the old place until the pointer moves. Found by CodeRabbit in review of #3970; a unit test covers it. Estimates unchanged.
