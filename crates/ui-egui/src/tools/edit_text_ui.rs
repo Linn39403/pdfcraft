@@ -12,6 +12,7 @@ use pdfcraft_engine::{Edit, ObjectKind, ObjectTarget};
 use pdfcraft_render::DocInfo;
 
 use crate::canvas::{DocView, PageToolContext, PageXform};
+use crate::page_cursor::Layer;
 use crate::page_pointer::PagePointer;
 
 mod background;
@@ -390,7 +391,7 @@ pub(crate) fn page_input(cx: PageToolContext<'_>, lines: &[pdfcraft_engine::Text
         if resizing {
             draw_handles(preview);
         }
-        ui.ctx().set_cursor_icon(if resizing { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::Move });
+        view.cursor.claim(Layer::Drag, if resizing { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::Move });
         if resp.drag_stopped() || !ptr.any_down {
             view.block_drag = None;
             let (from, to) = (user_box(xf, info, page, b), user_box(xf, info, page, preview));
@@ -445,8 +446,7 @@ pub(crate) fn page_input(cx: PageToolContext<'_>, lines: &[pdfcraft_engine::Text
             view.objects.hold_editor = view.line_editor.is_some();
         }
         if resp.contains_pointer() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
-            resp.clone().on_hover_text(reason);
+            view.cursor.claim_with_tip(Layer::Text, egui::CursorIcon::NotAllowed, Some(reason.to_owned()));
         }
         return true;
     }
@@ -458,17 +458,13 @@ pub(crate) fn page_input(cx: PageToolContext<'_>, lines: &[pdfcraft_engine::Text
         draw_handles(boxes[hit]);
     }
     // A closed paragraph moves when dragged (the four-way arrow says so; a click still opens it
-    // for typing); an edge rewraps it. The open one takes the text cursor. Only where the page
-    // shows, so the mode bar and side panels over a paragraph scrolled under them keep their own
-    // cursor (#2755).
-    if resp.contains_pointer() {
-        ui.ctx().set_cursor_icon(if on_edge {
-            egui::CursorIcon::ResizeHorizontal
-        } else if active.is_none() {
-            egui::CursorIcon::Move
-        } else {
-            egui::CursorIcon::Text
-        });
+    // for typing); an edge rewraps it. The open one takes the text cursor.
+    if on_edge {
+        view.cursor.claim(Layer::Handle, egui::CursorIcon::ResizeHorizontal);
+    } else if active.is_none() {
+        view.cursor.claim(Layer::Text, egui::CursorIcon::Move);
+    } else {
+        view.cursor.claim(if active == Some(hit) { Layer::Editor } else { Layer::Text }, egui::CursorIcon::Text);
     }
     if resp.clicked() {
         view.image_selection = None;
