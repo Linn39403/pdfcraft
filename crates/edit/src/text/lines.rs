@@ -303,6 +303,9 @@ fn text_lines_in(
                 mixed_appearance: false,
                 unreadable_mode: s.state.unreadable.as_deref().map(str::to_owned),
                 runs: vec![(s.text.clone(), s.ink.len(), false)],
+                soft_break: s.soft_break,
+                hard_break: s.hard_break,
+                soft_gap: s.soft_gap,
                 ops: std::iter::once(s.op).chain(s.extra_ops.iter().copied()).collect(),
                 origin: Origin {
                     tm: s.tm.0,
@@ -354,6 +357,7 @@ pub(super) fn single_line_block(line: &TextLine, index: usize) -> TextBlock {
     TextBlock {
         text: line.text.clone(),
         editor_text: line.text.clone(),
+        reflow_text: line.text.clone(),
         rect: line.rect,
         base_font: line.base_font.clone(),
         size: line.size,
@@ -868,6 +872,9 @@ fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<Pen>, s: &Shown, strea
             mixed_appearance: false,
             unreadable_mode: s.state.unreadable.as_deref().map(str::to_owned),
             runs: vec![(s.text.clone(), s.ink.len(), false)],
+            soft_break: s.soft_break,
+            hard_break: s.hard_break,
+            soft_gap: s.soft_gap,
             ops: std::iter::once(s.op).chain(s.extra_ops.iter().copied()).collect(),
             origin: Origin {
                 tm: s.tm.0,

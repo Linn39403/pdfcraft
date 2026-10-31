@@ -337,7 +337,9 @@ fn mixed_line_edit_keeps_relative_same_bt_neighbor_and_does_not_wrap() {
 
 #[test]
 fn mixed_paragraph_edit_preserves_public_selection_and_other_paragraphs() {
-    let mut doc = fixture("BT /F1 24 Tf 72 700 Td (Before) Tj 0 -70 Td (A ) Tj 0.001 Tc (tail) Tj 0 Tc 0 -70 Td (After) Tj ET");
+    // Explicit normal leading makes the 70-point gaps paragraph breaks. Without TL, the
+    // repeated gaps intentionally count as one widely led paragraph in upstream grouping.
+    let mut doc = fixture("BT /F1 24 Tf 24 TL 72 700 Td (Before) Tj 0 -70 Td (A ) Tj 0.001 Tc (tail) Tj 0 Tc 0 -70 Td (After) Tj ET");
     let before = text_lines(&doc, 0).unwrap();
     assert_eq!(text_blocks(&doc, 0).unwrap().len(), 3);
     replace_block(&mut doc, 0, 1, "B tail").unwrap();
@@ -883,4 +885,32 @@ fn positioned_source_graphics_stack_refuses_without_assuming_text_matrix_semanti
         assert!(result.is_err(), "inner q/Q matrix semantics are not supported by exact source mapping");
         assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), saved);
     }
+}
+
+#[test]
+fn exact_spacing_justification_refuses_atomically() {
+    use pdfcraft_edit::{
+        added::Align,
+        text::{BlockStyle, rewrite_block},
+    };
+    let mut doc = fixture("BT /F1 12 Tf 72 700 Td (Alpha ) Tj 0.001 Tc (beta gamma) Tj ET");
+    let before = write_full(&doc, &SaveOptions::default()).unwrap();
+    let error =
+        rewrite_block(&mut doc, 0, 0, Some("Alpha beta delta"), &BlockStyle { align: Some(Align::Justify), width: Some(80.0), ..Default::default() })
+            .unwrap_err();
+    assert!(error.to_string().contains("justification"), "{error}");
+    assert_eq!(write_full(&doc, &SaveOptions::default()).unwrap(), before);
+}
+
+#[test]
+fn exact_spacing_soft_wrap_preserves_consumed_spaces_after_reopen() {
+    use pdfcraft_edit::text::{BlockStyle, rewrite_block};
+    let mut doc = fixture("BT /F1 12 Tf 72 700 Td (Alpha  ) Tj 0.001 Tc (beta gamma) Tj ET");
+    rewrite_block(&mut doc, 0, 0, Some("Alpha  beta delta"), &BlockStyle { width: Some(45.0), ..Default::default() }).unwrap();
+    let saved = reopen(&doc);
+    let blocks = text_blocks(&saved, 0).unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert!(blocks[0].rows.len() > 1, "fixture must wrap");
+    assert_eq!(blocks[0].reflow_text, "Alpha  beta delta");
+    assert_no_graphics_stack_inside_text(&saved);
 }
