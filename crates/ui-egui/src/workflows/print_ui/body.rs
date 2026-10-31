@@ -174,8 +174,7 @@ pub(crate) fn body(
                 });
                 if d.printer != before {
                     d.printer_picked = true;
-                    d.show_driver_options = false;
-                    d.driver_error = None;
+                    d.reset_driver_options();
                 }
                 ui.end_row();
                 // The spooler answered with no printer at all (#160): say so, rather than

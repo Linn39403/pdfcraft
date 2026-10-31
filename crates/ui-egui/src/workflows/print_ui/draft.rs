@@ -139,6 +139,18 @@ impl Default for PrintDraft {
 }
 
 impl PrintDraft {
+    /// Drop state owned by the old queue when the selected printer changes.
+    pub(super) fn reset_driver_options(&mut self) {
+        self.show_driver_options = false;
+        self.driver_options = None;
+        self.driver_options_diagnostic = None;
+        self.driver_choices.clear();
+        self.driver_error = None;
+        // The worker can finish, but its reply no longer belongs to this selection.
+        self.driver_options_loading = None;
+        self.read_options_for = None;
+    }
+
     /// Choose Page Sizing & Handling. Label loads label stock and remembers the paper it
     /// replaced; leaving Label gives that paper back, unless another one was picked meanwhile.
     pub fn set_handling(&mut self, handling: Handling) {

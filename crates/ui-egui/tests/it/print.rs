@@ -333,6 +333,72 @@ fn printers_listed_in_the_background_preselect_the_default_unless_one_was_picked
     assert_eq!(h.state().print_draft.printer, None, "Save as PDF, as picked");
 }
 
+/// A refreshed list must not show another queue's diagnostic or accept its delayed options.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn printer_list_refresh_invalidates_properties_only_when_selection_changes() {
+    use pdfcraft_engine::print::spool::{Printer, PrinterOptions};
+    use std::sync::{Arc, Mutex};
+    for replacement in ["Office", "Front Desk"] {
+        let mut h = harness();
+        let gate = Arc::new(Mutex::new(()));
+        let hold = gate.lock().unwrap();
+        let wait = gate.clone();
+        h.state_mut().printer_source = Some(Arc::new(move || {
+            let _open = wait.lock();
+            vec![Printer { name: replacement.into(), default: true, two_sided: None, description: String::new() }]
+        }));
+        assert!(h.state_mut().execute("print.dialog"));
+        let options_gate = Arc::new(Mutex::new(()));
+        let options_hold = options_gate.lock().unwrap();
+        let options_wait = options_gate.clone();
+        let (done, arrived) = std::sync::mpsc::channel();
+        h.state_mut().options_source = Some(Arc::new(move |_| {
+            let _open = options_wait.lock();
+            let _ = done.send(());
+            PrinterOptions { options: Vec::new(), diagnostic: Some("Late Office diagnostic".into()) }
+        }));
+        let d = &mut h.state_mut().print_draft;
+        d.printer = Some("Office".into());
+        d.printer_picked = true;
+        d.driver_options = Some(("Office".into(), Vec::new()));
+        d.driver_options_diagnostic = Some("Office diagnostic".into());
+        d.driver_error = Some("Office preferences failed".into());
+        d.driver_choices.insert("InputSlot".into(), "Tray2".into());
+        d.show_driver_options = true;
+        d.driver_options_loading = Some("Office".into());
+        d.read_options_for = Some("Office".into());
+        h.run_steps(2);
+        h.get_by_label("Office diagnostic");
+        drop(hold);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while h.state().print_draft.printers_loading && std::time::Instant::now() < deadline {
+            h.run_steps(1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!h.state().print_draft.printers_loading);
+        assert_eq!(h.state().print_draft.printer.as_deref(), Some(replacement));
+        let changed = replacement != "Office";
+        let d = &h.state().print_draft;
+        assert_eq!(d.show_driver_options, !changed);
+        assert_eq!(d.driver_options_diagnostic.is_none(), changed);
+        assert_eq!(d.driver_options.is_none(), changed);
+        assert_eq!(d.driver_choices.is_empty(), changed);
+        assert_eq!(d.driver_error.is_none(), changed);
+        assert_eq!(d.driver_options_loading.is_none(), changed);
+        assert!(d.read_options_for.is_none());
+        drop(options_hold);
+        arrived.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        // Allow the worker to send its result after acknowledging its release.
+        for _ in 0..20 {
+            h.run_steps(1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(h.state().print_draft.driver_options_diagnostic.is_none(), changed);
+        assert_eq!(h.query_by_label("Late Office diagnostic").is_none(), changed);
+    }
+}
+
 /// The printer picked in the dialog, Save as PDF included, is still chosen the next time Print
 /// opens (#3537), until a fresh list no longer has it.
 #[test]
